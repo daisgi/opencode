@@ -13,6 +13,7 @@ import { FileSystemV1 } from "./filesystem-v1.js"
 import { Form } from "./form.js"
 import { InstallationEvent } from "./installation-event.js"
 import { Integration } from "./integration.js"
+import { ClientKV } from "./client-kv.js"
 import { LegacyEventV1 } from "./legacy-event.js"
 import { LspEvent } from "./lsp-event.js"
 import { LocationEvent } from "./location-event.js"
@@ -67,6 +68,7 @@ const featureDefinitions = Event.inventory(
   ...Form.Event.Definitions,
   ...WebSearch.Event.Definitions,
   ...Artifact.Event.Definitions,
+  ...ClientKV.Event.Definitions,
 )
 
 export const ServerDefinitions = Event.inventory(

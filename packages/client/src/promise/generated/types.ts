@@ -308,6 +308,14 @@ export type FormWhen1 = { key: string; op: "eq" | "neq"; value: string | number 
 
 export type FormValue1 = string | number | boolean | Array<string>
 
+export type ClientKVSpace = string
+
+export type ClientKVRevision = number
+
+export type ClientKVKey = string
+
+export type ClientKVValue = string | number | boolean | Array<JsonValue> | { [x: string]: JsonValue }
+
 export type SessionStatus =
   | { type: "idle" }
   | {
@@ -930,6 +938,8 @@ export type FormMultiselectField1 = {
 }
 
 export type FormAnswer1 = { [x: string]: FormValue1 }
+
+export type ClientKVEntry = { key: ClientKVKey; value: ClientKVValue }
 
 export type ScheduleWhenIn = { type: "in"; in: ScheduleDuration; tz?: string }
 
@@ -2002,6 +2012,24 @@ export type ArtifactUpdated = {
   data: {}
 }
 
+export type ExperimentalKvUpdated = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "experimental.kv.updated"
+  location?: LocationRef
+  data: { space: ClientKVSpace; key: ClientKVKey; value: ClientKVValue; revision: ClientKVRevision }
+}
+
+export type ExperimentalKvDeleted = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "experimental.kv.deleted"
+  location?: LocationRef
+  data: { space: ClientKVSpace; key: ClientKVKey; revision: ClientKVRevision }
+}
+
 export type SessionStatusUpdated = {
   id: EventID
   created: number
@@ -2267,6 +2295,24 @@ export type FormReplied = {
   type: "form.replied"
   location?: LocationRef
   data: { id: FormID; sessionID: string; answer: FormAnswer1 }
+}
+
+export type ExperimentalKvSnapshot = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "experimental.kv.snapshot"
+  location?: LocationRef
+  data: { space: ClientKVSpace; revision: ClientKVRevision; entries: Array<ClientKVEntry> }
+}
+
+export type ExperimentalKvDelta = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "experimental.kv.delta"
+  location?: LocationRef
+  data: { space: ClientKVSpace; revision: ClientKVRevision; entries: Array<ClientKVEntry>; deleted: Array<ClientKVKey> }
 }
 
 export type ScheduleWhen = ScheduleWhenIn | ScheduleWhenAt | ScheduleWhenEvery | ScheduleWhenCron
@@ -2974,6 +3020,10 @@ export type V2Event =
   | FormCancelled
   | WebsearchUpdated
   | ArtifactUpdated
+  | ExperimentalKvSnapshot
+  | ExperimentalKvDelta
+  | ExperimentalKvUpdated
+  | ExperimentalKvDeleted
   | SessionStatusUpdated
   | SessionIdle
   | TuiPromptAppend
@@ -4473,6 +4523,10 @@ export type EventSubscribeInput = {
         | "form.cancelled"
         | "websearch.updated"
         | "artifact.updated"
+        | "experimental.kv.snapshot"
+        | "experimental.kv.delta"
+        | "experimental.kv.updated"
+        | "experimental.kv.deleted"
         | "session.status"
         | "session.idle"
         | "tui.prompt.append"
@@ -4488,6 +4542,7 @@ export type EventSubscribeInput = {
         | `${"rpc."}${string}`
       >
     | undefined
+  readonly "experimental.kv"?: ReadonlyArray<string> | undefined
 }
 
 export type EventSubscribeOutput = V2Event
@@ -4757,6 +4812,18 @@ export type ExperimentalJobListInput = {
 }
 
 export type ExperimentalJobListOutput = { data: Array<JobInfo> }["data"]
+
+export type ExperimentalKvSetInput = {
+  readonly space: string
+  readonly key: string
+  readonly value: string | number | boolean | ReadonlyArray<JsonValue> | { readonly [x: string]: JsonValue }
+}
+
+export type ExperimentalKvSetOutput = void
+
+export type ExperimentalKvDeleteInput = { readonly space: string; readonly key: string }
+
+export type ExperimentalKvDeleteOutput = void
 
 export type ShellListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
 

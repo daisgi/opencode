@@ -43,6 +43,7 @@ import { HttpApiBuilder } from "effect/http-api"
 import { Context, Effect, Layer, Option } from "effect"
 import { Api } from "./api"
 import { ServerAuth } from "./auth"
+import { ClientKVStore } from "./client-kv-store"
 import { CorsConfig } from "./cors"
 import { handlers } from "./handlers"
 import { authorizationLayer } from "./middleware/authorization"
@@ -84,6 +85,7 @@ const applicationServiceNodes = [
   Credential.node,
   WellKnown.node,
   ServerPairing.node,
+  ClientKVStore.node,
   LocationServiceMap.node,
   LocationActivity.node,
   SessionRestart.node,

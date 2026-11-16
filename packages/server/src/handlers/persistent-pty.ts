@@ -16,6 +16,7 @@ import { HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder, HttpApiSchema } from "effect/http-api"
 import { Socket } from "effect/socket"
 import { Api } from "../api"
+import { ClientKVStore } from "../client-kv-store"
 import { CorsConfig, isAllowedRequestOrigin } from "../cors"
 import { makeArtifact } from "./artifact"
 import { makeJob } from "./job"
@@ -30,12 +31,19 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
     const pty = yield* PersistentPty.Service
     const artifact = yield* makeArtifact
     const job = yield* makeJob
+    const kv = yield* ClientKVStore.Service
     const mediaGet = yield* makeMediaGet
     const schedule = yield* makeSchedule
 
     return handlers
       .handleRaw("media.get", (ctx) => mediaGet(ctx.params.hash, ctx.request))
       .handle("job.list", (ctx) => job.list(ctx.query))
+      .handle("kv.set", (ctx) =>
+        kv.set(ctx.params.space, ctx.params.key, ctx.payload.value).pipe(Effect.as(HttpApiSchema.NoContent.make())),
+      )
+      .handle("kv.delete", (ctx) =>
+        kv.remove(ctx.params.space, ctx.params.key).pipe(Effect.as(HttpApiSchema.NoContent.make())),
+      )
       .handle("artifacts.providers", (ctx) => artifact.providers(ctx.query, ctx.request))
       .handle("artifacts.list", (ctx) => artifact.list(ctx.query, ctx.request))
       .handle("artifacts.create", (ctx) => artifact.create(ctx.query, ctx.payload, ctx.request))

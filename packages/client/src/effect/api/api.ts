@@ -2154,6 +2154,10 @@ export type EventSubscribeInput = {
         | "form.cancelled"
         | "websearch.updated"
         | "artifact.updated"
+        | "experimental.kv.snapshot"
+        | "experimental.kv.delta"
+        | "experimental.kv.updated"
+        | "experimental.kv.deleted"
         | "session.status"
         | "session.idle"
         | "tui.prompt.append"
@@ -2169,6 +2173,7 @@ export type EventSubscribeInput = {
         | `${"rpc."}${string}`
       >
     | undefined
+  readonly "experimental.kv"?: ReadonlyArray<string> | undefined
 }
 export type EventSubscribeOutput = OpenCodeEvent
 export type EventSubscribeOperation<E = never> = (input?: EventSubscribeInput) => Stream.Stream<EventSubscribeOutput, E>
@@ -2526,6 +2531,22 @@ export type ExperimentalJobListOperation<E = never> = (
   input?: ExperimentalJobListInput,
 ) => Effect.Effect<ExperimentalJobListOutput, E>
 
+export type ExperimentalKvSetInput = {
+  readonly space: string
+  readonly key: string
+  readonly value: string | number | boolean | ReadonlyArray<Schema.Json> | { readonly [x: string]: Schema.Json }
+}
+export type ExperimentalKvSetOutput = void
+export type ExperimentalKvSetOperation<E = never> = (
+  input: ExperimentalKvSetInput,
+) => Effect.Effect<ExperimentalKvSetOutput, E>
+
+export type ExperimentalKvDeleteInput = { readonly space: string; readonly key: string }
+export type ExperimentalKvDeleteOutput = void
+export type ExperimentalKvDeleteOperation<E = never> = (
+  input: ExperimentalKvDeleteInput,
+) => Effect.Effect<ExperimentalKvDeleteOutput, E>
+
 export interface ExperimentalApi<E = never> {
   readonly persistentPty: {
     readonly read: ExperimentalPersistentPtyReadOperation<E>
@@ -2556,6 +2577,7 @@ export interface ExperimentalApi<E = never> {
     readonly delete: ExperimentalArtifactsDeleteOperation<E>
   }
   readonly job: { readonly list: ExperimentalJobListOperation<E> }
+  readonly kv: { readonly set: ExperimentalKvSetOperation<E>; readonly delete: ExperimentalKvDeleteOperation<E> }
 }
 
 export type ShellListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }

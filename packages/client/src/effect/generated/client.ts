@@ -269,6 +269,10 @@ import type {
   ExperimentalArtifactsDeleteOutput,
   ExperimentalJobListInput,
   ExperimentalJobListOutput,
+  ExperimentalKvSetInput,
+  ExperimentalKvSetOutput,
+  ExperimentalKvDeleteInput,
+  ExperimentalKvDeleteOutput,
   ShellListInput,
   ShellListOutput,
   ShellCreateInput,
@@ -1418,7 +1422,9 @@ const adaptGroupRpc = (raw: RawClient["server.rpc"]) => ({ call: EndpointRpcCall
 const EndpointEventSubscribe = (raw: RawClient["server.event"]) => (input?: EventSubscribeInput) =>
   preserveStream<EventSubscribeOutput>()(
     Stream.unwrap(
-      raw["event.subscribe"]({ query: { types: input?.["types"] } }).pipe(
+      raw["event.subscribe"]({
+        query: { types: input?.["types"], "experimental.kv": input?.["experimental.kv"] },
+      }).pipe(
         Effect.mapError(mapClientError),
         Effect.map((stream) => stream.pipe(Stream.mapError(mapClientError))),
       ),
@@ -1715,6 +1721,18 @@ const EndpointExperimentalJobList = (raw: RawClient["server.experimental"]) => (
     ),
   )
 
+const EndpointExperimentalKvSet = (raw: RawClient["server.experimental"]) => (input: ExperimentalKvSetInput) =>
+  preserveEffect<ExperimentalKvSetOutput>()(
+    raw["kv.set"]({ params: { space: input["space"], key: input["key"] }, payload: { value: input["value"] } }).pipe(
+      Effect.mapError(mapClientError),
+    ),
+  )
+
+const EndpointExperimentalKvDelete = (raw: RawClient["server.experimental"]) => (input: ExperimentalKvDeleteInput) =>
+  preserveEffect<ExperimentalKvDeleteOutput>()(
+    raw["kv.delete"]({ params: { space: input["space"], key: input["key"] } }).pipe(Effect.mapError(mapClientError)),
+  )
+
 const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
   persistentPty: {
     read: EndpointExperimentalPersistentPtyRead(raw),
@@ -1745,6 +1763,7 @@ const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
     delete: EndpointExperimentalArtifactsDelete(raw),
   },
   job: { list: EndpointExperimentalJobList(raw) },
+  kv: { set: EndpointExperimentalKvSet(raw), delete: EndpointExperimentalKvDelete(raw) },
 })
 
 const EndpointShellList = (raw: RawClient["server.shell"]) => (input?: ShellListInput) =>

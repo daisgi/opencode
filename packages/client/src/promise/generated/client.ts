@@ -271,6 +271,10 @@ import type {
   ExperimentalArtifactsViewOutput,
   ExperimentalJobListInput,
   ExperimentalJobListOutput,
+  ExperimentalKvSetInput,
+  ExperimentalKvSetOutput,
+  ExperimentalKvDeleteInput,
+  ExperimentalKvDeleteOutput,
   ShellListInput,
   ShellListOutput,
   ShellCreateInput,
@@ -1702,6 +1706,31 @@ export function make(options: ClientOptions) {
             requestOptions,
           ).then((value) => value.data),
       },
+      kv: {
+        set: (input: ExperimentalKvSetInput, requestOptions?: RequestOptions) =>
+          request<ExperimentalKvSetOutput>(
+            {
+              method: "PUT",
+              path: `/api/experimental/kv/${encodeURIComponent(input.space)}/${encodeURIComponent(input.key)}`,
+              body: { value: input["value"] },
+              successStatus: 204,
+              declaredStatuses: [400, 401],
+              empty: true,
+            },
+            requestOptions,
+          ),
+        delete: (input: ExperimentalKvDeleteInput, requestOptions?: RequestOptions) =>
+          request<ExperimentalKvDeleteOutput>(
+            {
+              method: "DELETE",
+              path: `/api/experimental/kv/${encodeURIComponent(input.space)}/${encodeURIComponent(input.key)}`,
+              successStatus: 204,
+              declaredStatuses: [400, 401],
+              empty: true,
+            },
+            requestOptions,
+          ),
+      },
       migration: {
         v1: {
           status: (requestOptions?: RequestOptions) =>
@@ -2284,7 +2313,7 @@ export function make(options: ClientOptions) {
           {
             method: "GET",
             path: `/api/event`,
-            query: { types: input?.["types"] },
+            query: { types: input?.["types"], "experimental.kv": input?.["experimental.kv"] },
             successStatus: 200,
             declaredStatuses: [400, 401],
             empty: false,

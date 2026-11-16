@@ -1,6 +1,7 @@
 export * as EventFeed from "./event-feed"
 
 import { Bus } from "@opencode/core/bus"
+import { ClientKV } from "@opencode/schema/client-kv"
 import { Event } from "@opencode/schema/event"
 import { isOpenCodeEvent, type OpenCodeEvent } from "@opencode/protocol/groups/event"
 import { Cause, Context, Effect, Layer, Queue, Schema, Scope, Stream } from "effect"
@@ -21,10 +22,21 @@ export class EncodingError extends Schema.TaggedError<EncodingError>()("EventFee
 export type Error = SubscriberOverflowError | EncodingError
 
 export interface Interface {
-  readonly subscribe: (types?: ReadonlyArray<string>) => Effect.Effect<Stream.Stream<string, Error>, never, Scope.Scope>
+  /** `experimental.kv.*` events reach only subscribers that list their space in `spaces`, whatever `types` says. */
+  readonly subscribe: (
+    types?: ReadonlyArray<string>,
+    spaces?: ReadonlyArray<string>,
+  ) => Effect.Effect<Stream.Stream<string, Error>, never, Scope.Scope>
+}
+
+interface Filter {
+  readonly types?: ReadonlySet<string>
+  readonly spaces: ReadonlySet<string>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/server/EventFeed") {}
+
+const isKVEvent = Schema.is(Schema.Union([ClientKV.Event.Updated, ClientKV.Event.Deleted]))
 
 export function frame(event: OpenCodeEvent) {
   return `data: ${JSON.stringify(event)}\n\n`
@@ -36,7 +48,7 @@ export const make = Effect.fn("EventFeed.make")(function* (
 ) {
   const capacity = options?.capacity ?? SubscriberCapacity
   const render = options?.encode ?? frame
-  const subscribers = new Map<Queue.Queue<string, Error>, ReadonlySet<string> | undefined>()
+  const subscribers = new Map<Queue.Queue<string, Error>, Filter>()
 
   const fail = (error: Error) =>
     Effect.sync(() => {
@@ -46,10 +58,11 @@ export const make = Effect.fn("EventFeed.make")(function* (
     })
 
   const publish = Effect.fnUntraced(function* (event: Event.Payload) {
+    const space = isKVEvent(event) ? event.data.space : undefined
     if (!isOpenCodeEvent(event)) return
     let encoded: string | undefined
-    for (const [subscriber, types] of subscribers) {
-      if (types && !types.has(event.type)) continue
+    for (const [subscriber, filter] of subscribers) {
+      if (space === undefined ? filter.types && !filter.types.has(event.type) : !filter.spaces.has(space)) continue
       encoded ??= yield* Effect.try({
         try: () => render(event),
         catch: (cause) => new EncodingError({ eventID: event.id, eventType: event.type, cause }),
@@ -73,10 +86,17 @@ export const make = Effect.fn("EventFeed.make")(function* (
   yield* Effect.addFinalizer(() => unsubscribe)
 
   return Service.of({
-    subscribe: (types) =>
+    subscribe: (types, spaces) =>
       Effect.acquireRelease(
         Queue.dropping<string, Error>(capacity).pipe(
-          Effect.tap((queue) => Effect.sync(() => subscribers.set(queue, types?.length ? new Set(types) : undefined))),
+          Effect.tap((queue) =>
+            Effect.sync(() =>
+              subscribers.set(queue, {
+                types: types?.length ? new Set(types) : undefined,
+                spaces: new Set(spaces),
+              }),
+            ),
+          ),
         ),
         (queue) =>
           Effect.sync(() => subscribers.delete(queue)).pipe(Effect.andThen(Queue.shutdown(queue)), Effect.asVoid),
