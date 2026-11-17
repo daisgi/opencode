@@ -125,10 +125,11 @@ story("summarizes subagents as Agent while retaining their card titles", async (
   expect(colors[0]).not.toBe(colors[1])
 
   const gap = await group.evaluate((element) => {
-    const title = element.querySelector('[data-component="context-tool-group-trigger"]')!.getBoundingClientRect()
+    // The elapsed time sits last in the header, so the arrow should follow it, not the title.
+    const last = element.querySelector('[data-slot="tool-elapsed"]')!
     const arrow = element.querySelector('[data-slot="collapsible-arrow-icon"]')!.getBoundingClientRect()
 
-    return arrow.left - title.right
+    return arrow.left - last.getBoundingClientRect().right
   })
 
   expect(gap).toBeLessThanOrEqual(8)

@@ -39,7 +39,7 @@ story("collapses each run of reads inside a Used group into one row", async ({ m
 })
 
 story("truncates long read rows and expands them in place", async ({ mount }) => {
-  const root = await mount("current-read-group--used-group", { args: { width: "420" } })
+  const root = await mount("current-read-group--used-group", { args: { width: "440" } })
   const reads = root.locator('[data-component="read-tool-group"]')
   await expect(reads.first()).not.toHaveAttribute("role", "button")
   const row = reads.filter({ hasText: "runner.ts" })
