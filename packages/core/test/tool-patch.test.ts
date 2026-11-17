@@ -3,6 +3,7 @@ import path from "path"
 import { describe, expect } from "bun:test"
 import { Effect, Exit, Layer } from "effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
+import { Config } from "@opencode/core/config"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Environment } from "@opencode/core/environment/index"
 import { Formatter } from "@opencode/core/formatter"
@@ -17,6 +18,8 @@ import { Session } from "@opencode/core/session"
 import { Tool } from "@opencode/core/tool"
 import { PatchTool } from "@opencode/core/tool/plugin/patch"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
+import { Document, type Entry, Info } from "@opencode/schema/config"
+import { ConfigExperimental } from "@opencode/schema/config/experimental"
 import { transformEnvironmentFiles } from "./fixture/environment"
 import { location } from "./fixture/location"
 import { tmpdir, withTempDir } from "./fixture/tmpdir"
@@ -47,6 +50,8 @@ const patchToolNode = makeLocationNode({
     Formatter.node,
     Location.node,
     Permission.node,
+    Config.node,
+    Session.node,
   ],
 })
 
@@ -60,6 +65,8 @@ let readsBeforeEditApproval = 0
 let editApproved = false
 let afterEditApproval = (): Effect.Effect<void> => Effect.void
 let formatFile = (_target: string): Effect.Effect<boolean> => Effect.succeed(false)
+let configEntries: Entry[] = []
+let sessionModelID = "claude-sonnet-4"
 
 const permission = permissionLayer({
   assert: (input) =>
@@ -96,6 +103,8 @@ const reset = () => {
   editApproved = false
   afterEditApproval = () => Effect.void
   formatFile = () => Effect.succeed(false)
+  configEntries = []
+  sessionModelID = "claude-sonnet-4"
 }
 
 const withTool = <A, E, R>(
@@ -137,6 +146,16 @@ const withTool = <A, E, R>(
         Location.node.replace(activeLocation),
         Formatter.node.replace(formatter),
         Permission.node.replace(permission),
+        Config.node.replace(Config.testLayer(configEntries)),
+        Session.node.replace(
+          Layer.succeed(Session.Service, {
+            get: (sessionID: Session.ID) =>
+              Effect.succeed({
+                id: sessionID,
+                model: Model.Ref.make({ providerID: Provider.ID.make("test"), id: Model.ID.make(sessionModelID) }),
+              } as Session.Info),
+          } as unknown as Session.Interface),
+        ),
       ]),
     ),
   )
@@ -156,38 +175,210 @@ const exists = (target: string) =>
     ),
   )
 const it = testEffect(Layer.empty)
-const withTempTool = <A, E, R>(body: (directory: string, registry: Tool.Interface) => Effect.Effect<A, E, R>) =>
+const withTempTool = <A, E, R>(
+  body: (directory: string, registry: Tool.Interface) => Effect.Effect<A, E, R>,
+  entries: Entry[] = [],
+) =>
   withTempDir((tmp) => {
     reset()
+    configEntries = entries
     return withTool(tmp.path, (registry) => body(tmp.path, registry))
   })
+
+const editingConfig = (editing: ConfigExperimental.Editing) => [
+  new Document({
+    type: "document",
+    info: new Info({ experimental: new ConfigExperimental.Info({ editing }) }),
+  }),
+]
+
+const contextEvent = (id: string): SessionHooks["context"] => ({
+  sessionID,
+  agent: toolIdentity.agent,
+  model: Model.Ref.make({ providerID: Provider.ID.make("test"), id: Model.ID.make(id) }),
+  system: [],
+  messages: [],
+  tools: Object.fromEntries(
+    ["patch", "edit", "write", "read"].map((name) => [name, { description: name, input: { type: "object" } }]),
+  ),
+  options: {},
+})
 
 describe("PatchTool", () => {
   it.live("selects the same edit tools for compaction and generate requests as the agent loop", () =>
     withTempTool(() =>
       Effect.gen(function* () {
-        const event = (id: string): SessionHooks["context"] => ({
-          sessionID,
-          agent: toolIdentity.agent,
-          model: Model.Ref.make({ providerID: Provider.ID.make("test"), id: Model.ID.make(id) }),
-          system: [],
-          messages: [],
-          tools: Object.fromEntries(
-            ["patch", "edit", "write", "read"].map((name) => [name, { description: name, input: { type: "object" } }]),
-          ),
-          options: {},
-        })
         for (const name of ["context", "compaction", "generate"]) {
           const hook = sessionHooks.get(name)
           expect(hook).toBeDefined()
-          const claude = event("claude-sonnet-4")
+          const claude = contextEvent("claude-sonnet-4")
           yield* hook!(claude)
           expect(Object.keys(claude.tools)).toEqual(["edit", "write", "read"])
-          const gpt = event("gpt-5")
+          const gpt = contextEvent("gpt-5")
           yield* hook!(gpt)
           expect(Object.keys(gpt.tools)).toEqual(["patch", "read"])
         }
       }),
+    ),
+  )
+
+  it.live("applies experimental editing add and remove deltas", () =>
+    withTempTool(
+      () =>
+        Effect.gen(function* () {
+          const hook = sessionHooks.get("context")!
+          for (const id of ["claude-sonnet-4", "gpt-5"]) {
+            const event = contextEvent(id)
+            yield* hook(event)
+            expect(Object.keys(event.tools)).toEqual(["patch", "read"])
+          }
+        }),
+      editingConfig({ add: ["patch"], remove: ["edit", "write"] }),
+    ),
+  )
+
+  it.live("keeps the model-dependent base when only remove is configured", () =>
+    withTempTool(
+      () =>
+        Effect.gen(function* () {
+          const hook = sessionHooks.get("context")!
+          const gpt = contextEvent("gpt-5")
+          yield* hook(gpt)
+          expect(Object.keys(gpt.tools)).toEqual(["patch", "read"])
+          const claude = contextEvent("claude-sonnet-4")
+          yield* hook(claude)
+          expect(Object.keys(claude.tools)).toEqual(["read"])
+        }),
+      editingConfig({ remove: ["edit", "write"] }),
+    ),
+  )
+
+  it.live("uses the last matching editing rule over the top-level delta", () =>
+    withTempTool(
+      () =>
+        Effect.gen(function* () {
+          const hook = sessionHooks.get("context")!
+          const claude = contextEvent("claude-sonnet-4")
+          yield* hook(claude)
+          expect(Object.keys(claude.tools)).toEqual(["patch", "read"])
+          const gpt = contextEvent("gpt-5")
+          yield* hook(gpt)
+          expect(Object.keys(gpt.tools)).toEqual(["edit", "write", "read"])
+        }),
+      editingConfig({
+        add: ["edit", "write"],
+        remove: ["patch"],
+        rules: [{ match: "^test/claude", add: ["patch"], remove: ["edit", "write"] }],
+      }),
+    ),
+  )
+
+  it.live("reports patch results without counts when result_style is summary", () =>
+    withTempTool(
+      (directory, registry) =>
+        Effect.gen(function* () {
+          const settled = yield* executeTool(
+            registry,
+            call("*** Begin Patch\n*** Add File: style-summary.txt\n+created\n*** End Patch"),
+          )
+          expect(settled.status).toBe("completed")
+          if (settled.status !== "completed") return
+          const text = settled.content?.[0]?.type === "text" ? settled.content[0].text : ""
+          expect(text).toContain("A style-summary.txt")
+          expect(text).not.toContain("(+")
+          expect(yield* Effect.promise(() => fs.readFile(path.join(directory, "style-summary.txt"), "utf8"))).toBe(
+            "created\n",
+          )
+        }),
+      editingConfig({ result_style: "summary" }),
+    ),
+  )
+
+  it.live("keeps the base patch result when no editing config is set", () =>
+    withTempTool((directory, registry) =>
+      Effect.gen(function* () {
+        const settled = yield* executeTool(
+          registry,
+          call("*** Begin Patch\n*** Add File: default-style.txt\n+created\n*** End Patch"),
+        )
+        expect(settled.status).toBe("completed")
+        if (settled.status !== "completed") return
+        expect(settled.content).toEqual([
+          { type: "text", text: "Success. Updated the following files:\nA default-style.txt" },
+        ])
+        expect(yield* Effect.promise(() => fs.readFile(path.join(directory, "default-style.txt"), "utf8"))).toBe(
+          "created\n",
+        )
+      }),
+    ),
+  )
+
+  it.live("keeps editing when a later config sets another experimental option", () =>
+    withTempTool(
+      () =>
+        Effect.gen(function* () {
+          const hook = sessionHooks.get("context")!
+          const claude = contextEvent("claude-sonnet-4")
+          yield* hook(claude)
+          expect(Object.keys(claude.tools)).toEqual(["patch", "read"])
+        }),
+      [
+        ...editingConfig({ add: ["patch"], remove: ["edit", "write"] }),
+        new Document({
+          type: "document",
+          info: new Info({ experimental: new ConfigExperimental.Info({ subagent_depth: 2 }) }),
+        }),
+      ],
+    ),
+  )
+
+  it.live("includes the applied diff when result_style is diff and a rule overrides it", () =>
+    withTempTool(
+      (directory, registry) =>
+        Effect.gen(function* () {
+          sessionModelID = "claude-sonnet-4"
+          const settled = yield* executeTool(
+            registry,
+            call("*** Begin Patch\n*** Add File: style-diff.txt\n+created\n*** End Patch"),
+          )
+          expect(settled.status).toBe("completed")
+          if (settled.status !== "completed") return
+          const text = settled.content?.[0]?.type === "text" ? settled.content[0].text : ""
+          expect(text).toContain("A style-diff.txt (+1 -0)")
+          expect(text).toContain("+created")
+          expect(text).toContain("@@")
+          expect(text).not.toContain("Index:")
+          expect(text).not.toContain(directory)
+          expect(yield* Effect.promise(() => fs.readFile(path.join(directory, "style-diff.txt"), "utf8"))).toBe(
+            "created\n",
+          )
+        }),
+      editingConfig({
+        result_style: "summary",
+        rules: [{ match: "^test/claude", result_style: "diff" }],
+      }),
+    ),
+  )
+
+  it.live("truncates a large diff before returning it to the model", () =>
+    withTempTool(
+      (directory, registry) =>
+        Effect.gen(function* () {
+          const lines = Array.from({ length: 250 }, (_, index) => `+line ${index}`).join("\n")
+          const settled = yield* executeTool(
+            registry,
+            call(`*** Begin Patch\n*** Add File: large-diff.txt\n${lines}\n*** End Patch`),
+          )
+          expect(settled.status).toBe("completed")
+          if (settled.status !== "completed") return
+          const text = settled.content?.[0]?.type === "text" ? settled.content[0].text : ""
+          expect(text).toContain("... diff truncated ...")
+          expect(text).not.toContain("line 249")
+          expect(yield* Effect.promise(() => fs.readFile(path.join(directory, "large-diff.txt"), "utf8"))).toContain(
+            "line 249",
+          )
+        }),
+      editingConfig({ result_style: "diff" }),
     ),
   )
 
