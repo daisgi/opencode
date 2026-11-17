@@ -89,6 +89,7 @@ const setup = Effect.gen(function* () {
               fixture.events.push("permission")
               fixture.assertions.push(input)
             }),
+          assertNotDenied: () => Effect.void,
         }),
       ),
       WebSearch.node.replace(Layer.succeed(WebSearch.Service, websearch)),
@@ -189,6 +190,106 @@ describe("WebSearchTool registration", () => {
         ],
         metadata: { provider: "parallel" },
       })
+    }),
+  )
+
+  it.effect("uses the provider the model picks when the saved choice is random", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      yield* fixture.websearch.select("random")
+
+      expect(
+        yield* executeTool(fixture.registry, {
+          sessionID,
+          ...toolIdentity,
+          call: {
+            type: "tool-call",
+            id: "call-provider",
+            name: "websearch",
+            input: { query: "effect", providerID: "parallel" },
+          },
+        }),
+      ).toMatchObject({ status: "completed", metadata: { provider: "parallel" } })
+      expect(fixture.formRequests).toEqual([])
+      expect(fixture.websearch.queries).toEqual([{ query: "effect", providerID: WebSearch.ID.make("parallel") }])
+      expect(yield* fixture.kv.get(WebSearch.ProviderKey)).toBe("random")
+    }),
+  )
+
+  it.effect("keeps a provider the user pinned instead of the one the model asks for", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      yield* fixture.websearch.select(WebSearch.ID.make("exa"))
+
+      expect(
+        yield* executeTool(fixture.registry, {
+          sessionID,
+          ...toolIdentity,
+          call: {
+            type: "tool-call",
+            id: "call-pinned",
+            name: "websearch",
+            input: { query: "effect", providerID: "parallel" },
+          },
+        }),
+      ).toEqual({
+        status: "error",
+        error: {
+          type: "tool.execution",
+          message: 'Web search is pinned to "exa" by the user. Omit providerID or pass "exa".',
+        },
+      })
+      expect(fixture.websearch.queries).toEqual([])
+      expect(yield* fixture.kv.get(WebSearch.ProviderKey)).toBe(WebSearch.ID.make("exa"))
+    }),
+  )
+
+  it.effect("rejects a provider that is not available before searching", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+
+      expect(
+        yield* executeTool(fixture.registry, {
+          sessionID,
+          ...toolIdentity,
+          call: {
+            type: "tool-call",
+            id: "call-missing",
+            name: "websearch",
+            input: { query: "effect", providerID: "missing" },
+          },
+        }),
+      ).toEqual({
+        status: "error",
+        error: {
+          type: "tool.execution",
+          message: 'Unknown web search provider "missing". Available: exa, parallel.',
+        },
+      })
+      expect(fixture.events).toEqual([])
+      expect(fixture.formRequests).toEqual([])
+    }),
+  )
+
+  it.effect("asks for consent before the first search with a provider the model picks", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      fixture.formResponse = { status: "answered", answer: { choice: "allow" } }
+
+      expect(
+        yield* executeTool(fixture.registry, {
+          sessionID,
+          ...toolIdentity,
+          call: {
+            type: "tool-call",
+            id: "call-provider-consent",
+            name: "websearch",
+            input: { query: "effect", providerID: "parallel" },
+          },
+        }),
+      ).toMatchObject({ status: "completed", metadata: { provider: "parallel" } })
+      expect(fixture.formRequests).toHaveLength(1)
+      expect(fixture.websearch.queries).toEqual([{ query: "effect", providerID: WebSearch.ID.make("parallel") }])
     }),
   )
 
@@ -355,6 +456,35 @@ describe("WebSearchTool registration", () => {
       expect(results.every((item) => item.status === "completed")).toBe(true)
       expect(fixture.formRequests).toHaveLength(1)
       expect(yield* fixture.kv.get(WebSearch.ProviderKey)).toBe("random")
+    }),
+  )
+
+  it.effect("lists the live provider ids in the schema the model sees", () =>
+    Effect.gen(function* () {
+      contextHooks.length = 0
+      const fixture = yield* setup
+      const definition = (yield* toolDefinitions(fixture.registry)).find((tool) => tool.name === "websearch")
+      const schema = () =>
+        Effect.gen(function* () {
+          const event = {
+            tools: {
+              [WebSearchTool.name]: {
+                description: definition?.description ?? "",
+                input: structuredClone(definition?.inputSchema ?? {}),
+              },
+            },
+          }
+          yield* Effect.forEach(contextHooks, (hook) => hook(event as unknown as SessionContext))
+          return event.tools[WebSearchTool.name]?.input as {
+            required?: ReadonlyArray<string>
+            properties: Record<string, { enum?: ReadonlyArray<string> }>
+          }
+        })
+
+      expect((yield* schema()).properties.providerID?.enum).toEqual(["exa", "parallel"])
+      expect((yield* schema()).required).toEqual(["query"])
+      // An unchanged provider set emits the same schema, so the prompt prefix stays stable.
+      expect(JSON.stringify(yield* schema())).toBe(JSON.stringify(yield* schema()))
     }),
   )
 
