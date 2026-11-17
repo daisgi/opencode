@@ -441,9 +441,13 @@ export const Plugin = {
                               : jobs
                                   .background(job.id)
                                   .pipe(
-                                    Effect.map((info) =>
-                                      info ? { type: "backgrounded" as const, info, timedOut: true } : undefined,
-                                    ),
+                                    Effect.map((info: Job.Info | undefined) => {
+                                      if (!info) return undefined
+                                      // The command settled before the move: there is no background handoff to report, so
+                                      // let the call return the command's own output and exit code.
+                                      if (info.status !== "running") return { type: "finished" as const, info }
+                                      return { type: "backgrounded" as const, info, timedOut: true }
+                                    }),
                                   ),
                           ),
                         )

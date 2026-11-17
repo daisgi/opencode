@@ -104,8 +104,8 @@ type FinishResult = {
 type BackgroundResult = {
   info?: Info
   backgrounded?: Deferred.Deferred<Info>
-  // The job had already settled, so there was nothing to move.
-  settled?: boolean
+  // The job had already settled, so there was nothing to move. Its generation is consumed by the caller path below.
+  settled?: Scope.Closeable
 }
 
 type StartResult = { info: Info } | { info: Info; job: Active }
@@ -494,12 +494,14 @@ export const make = Effect.gen(function* () {
         if (job.isBackgrounded) return [{ info: snapshot(job) }, jobs]
         // Work that already settled has nothing left to move. Marking it would hand the caller a background result
         // whose completion notice was already written, so the call would report a running command that never notifies.
-        if (job.info.status !== "running") return [{ info: snapshot(job), settled: true }, jobs]
+        // The caller reads the snapshot's status and reports the command's own result instead.
+        if (job.info.status !== "running") return [{ info: snapshot(job), settled: job.scope }, jobs]
         const next = yield* markBackground(job)
         return [{ info: snapshot(next), backgrounded: job.backgrounded }, new Map(jobs).set(id, next)]
       }),
     )
     if (result.info && result.backgrounded) yield* Deferred.succeed(result.backgrounded, result.info)
+    if (result.settled) yield* consume(id, result.settled)
     return result.info
   })
 
@@ -507,9 +509,9 @@ export const make = Effect.gen(function* () {
     const result = yield* SynchronizedRef.modifyEffect(
       state.jobs,
       Effect.fnUntraced(function* (jobs): Effect.fn.Return<
-        readonly [Required<BackgroundResult>[], Map<string, Active>]
+        readonly [{ info: Info; backgrounded: Deferred.Deferred<Info> }[], Map<string, Active>]
       > {
-        const results: Required<BackgroundResult>[] = []
+        const results: { info: Info; backgrounded: Deferred.Deferred<Info> }[] = []
         const next = new Map(jobs)
         for (const [id, job] of jobs) {
           if (job.info.status !== "running") continue
@@ -517,7 +519,7 @@ export const make = Effect.gen(function* () {
           if (input.type !== undefined && job.info.type !== input.type) continue
           if (!job.blockingSessions.has(input.sessionID)) continue
           const updated = yield* markBackground(job)
-          results.push({ info: snapshot(updated), backgrounded: job.backgrounded, settled: false })
+          results.push({ info: snapshot(updated), backgrounded: job.backgrounded })
           next.set(id, updated)
         }
         return [results, next]

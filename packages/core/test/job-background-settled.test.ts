@@ -1,17 +1,18 @@
 import { describe, expect } from "bun:test"
 import { Deferred, Effect } from "effect"
-import { Job } from "@opencode/core/job"
-import { SessionSchema } from "@opencode/core/session/schema"
-import { testEffect } from "./lib/effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Database } from "@opencode/core/database/database"
+import { Job } from "@opencode/core/job"
+import { SessionSchema } from "@opencode/core/session/schema"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Global } from "@opencode/util/global"
+import { testEffect } from "./lib/effect"
+import { waitUntil } from "./lib/eventually"
 
 const it = testEffect(AppNodeBuilder.build(LayerNode.group([Job.node, Database.node, Global.node])))
 
 describe("Job.background on settled work", () => {
-  it.live("does not hand a settled job back as a background handoff", () =>
+  it.live("returns a settled job as finished instead of moving it", () =>
     Effect.gen(function* () {
       const jobs = yield* Job.Service
       const latch = yield* Deferred.make<void>()
@@ -29,7 +30,7 @@ describe("Job.background on settled work", () => {
 
       // The command finishes between the timeout firing and the move.
       yield* Deferred.succeed(latch, undefined)
-      yield* Effect.sleep("50 millis")
+      yield* waitUntil(jobs.get(job.id).pipe(Effect.map((info: Job.Info | undefined) => info?.status !== "running")))
 
       const info = yield* jobs.background(job.id)
       // The caller reads a finished job, not a running one it would wait on forever.
