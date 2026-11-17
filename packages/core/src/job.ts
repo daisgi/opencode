@@ -104,6 +104,8 @@ type FinishResult = {
 type BackgroundResult = {
   info?: Info
   backgrounded?: Deferred.Deferred<Info>
+  // The job had already settled, so there was nothing to move. Its generation is consumed by the caller path below.
+  settled?: Scope.Closeable
 }
 
 type StartResult = { info: Info } | { info: Info; job: Active }
@@ -490,11 +492,16 @@ export const make = Effect.gen(function* () {
         // Recoverable work may finish before the caller backgrounds it.
         if (!job || (job.info.status !== "running" && !job.recovery)) return [{}, jobs]
         if (job.isBackgrounded) return [{ info: snapshot(job) }, jobs]
+        // Work that already settled has nothing left to move. Marking it would hand the caller a background result
+        // whose completion notice was already written, so the call would report a running command that never notifies.
+        // The caller reads the snapshot's status and reports the command's own result instead.
+        if (job.info.status !== "running") return [{ info: snapshot(job), settled: job.scope }, jobs]
         const next = yield* markBackground(job)
         return [{ info: snapshot(next), backgrounded: job.backgrounded }, new Map(jobs).set(id, next)]
       }),
     )
     if (result.info && result.backgrounded) yield* Deferred.succeed(result.backgrounded, result.info)
+    if (result.settled) yield* consume(id, result.settled)
     return result.info
   })
 
@@ -502,9 +509,9 @@ export const make = Effect.gen(function* () {
     const result = yield* SynchronizedRef.modifyEffect(
       state.jobs,
       Effect.fnUntraced(function* (jobs): Effect.fn.Return<
-        readonly [Required<BackgroundResult>[], Map<string, Active>]
+        readonly [{ info: Info; backgrounded: Deferred.Deferred<Info> }[], Map<string, Active>]
       > {
-        const results: Required<BackgroundResult>[] = []
+        const results: { info: Info; backgrounded: Deferred.Deferred<Info> }[] = []
         const next = new Map(jobs)
         for (const [id, job] of jobs) {
           if (job.info.status !== "running") continue

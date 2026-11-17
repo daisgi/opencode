@@ -426,7 +426,15 @@ export const Plugin = {
                   if (yield* Deferred.isDone(stopped)) return yield* cancelled(info, job.id)
 
                   if (input.background === true) {
-                    yield* jobs.background(job.id)
+                    const moved = yield* jobs.background(job.id)
+                    // The command already settled, so it never left the foreground: report its own result instead of
+                    // a background handoff whose notice was already written.
+                    if (moved && moved.status !== "running") {
+                      if (moved.status === "error")
+                        return yield* Effect.fail(new Error(moved.error ?? "Command failed"))
+                      if (moved.status === "cancelled") return yield* Effect.fail(new Error("Command cancelled"))
+                      return yield* Deferred.await(settled)
+                    }
                     yield* notifyWhenDone(context.sessionID, job.id, info.id, info.command, settled)
                     return backgroundResult(info, yield* Clock.currentTimeMillis)
                   }
@@ -442,9 +450,13 @@ export const Plugin = {
                               : jobs
                                   .background(job.id)
                                   .pipe(
-                                    Effect.map((info) =>
-                                      info ? { type: "backgrounded" as const, info, timedOut: true } : undefined,
-                                    ),
+                                    Effect.map((info: Job.Info | undefined) => {
+                                      if (!info) return undefined
+                                      // The command settled before the move: there is no background handoff to report, so
+                                      // let the call return the command's own output and exit code.
+                                      if (info.status !== "running") return { type: "finished" as const, info }
+                                      return { type: "backgrounded" as const, info, timedOut: true }
+                                    }),
                                   ),
                           ),
                         )
