@@ -1,6 +1,6 @@
 import { sentryVitePlugin } from "@sentry/vite-plugin"
 import { fileURLToPath } from "node:url"
-import { defineConfig } from "vite"
+import { defineConfig, type Plugin } from "vite"
 import desktopPlugin, { channel } from "./vite.js"
 import { icons } from "./vite.icons"
 import { serviceWorker } from "./vite.pwa"
@@ -22,8 +22,18 @@ const sentry =
       })
     : false
 
+// The app is built for the root by default; `vite build --base=/opencode/` serves it under that path. A base without
+// its trailing slash would reach `import.meta.env.BASE_URL` and `%BASE_URL%` as is and glue paths onto it.
+const basePath: Plugin = {
+  name: "opencode-app:base-path",
+  config(config) {
+    if (config.base?.startsWith("/") && !config.base.endsWith("/")) return { base: `${config.base}/` }
+  },
+}
+
 export default defineConfig({
   plugins: [
+    basePath,
     desktopPlugin,
     icons(channel),
     serviceWorker(fileURLToPath(new URL("./dist", import.meta.url))),
