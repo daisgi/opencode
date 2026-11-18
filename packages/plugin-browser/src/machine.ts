@@ -1,8 +1,9 @@
 export * as BrowserMachine from "./machine.js"
 
-import type { Permission } from "@opencode/schema/permission"
+import { Permission } from "@opencode/schema/permission"
 import type { Session } from "@opencode/schema/session"
 import { Tool } from "@opencode/schema/tool"
+import { Wildcard } from "@opencode/schema/wildcard"
 import type { Browser } from "./rpc.js"
 import { BrowserSkill } from "./skill.js"
 
@@ -12,11 +13,15 @@ export const PERMISSION_SYNC_TIMEOUT_MS = 10_000
 /** How long a dispatched browser command may run before it times out and is cancelled on the desktop. */
 export const REQUEST_TIMEOUT_MS = 60_000
 
-/** The browser tools and their skill, which an attachment allows together. */
-export const ACCESS = [
-  { action: "browser", resource: "*" },
-  { action: "skill", resource: BrowserSkill.id },
-] as const
+/**
+ * What an attachment allows: the browser tools. It grants no skill rule. The `experimental.rules` hook shows the
+ * built-in skill only while the session holds this grant, so the grant cannot outrank a person's own rules for any
+ * skill, including their own skill named `browser`.
+ */
+export const GRANT = { action: "browser", resource: "*", effect: "allow" } as const
+
+/** Every rule an attachment has granted. Earlier versions also allowed the skill; those grants are still recognised. */
+const GRANTED = [GRANT, { action: "skill", resource: BrowserSkill.id }] as const
 
 /** The one `session.permissions` sync in flight for a session: grant (`allow`) or revoke the browser rules. */
 export type PermissionSync = { readonly attempt: number; readonly allow: boolean }
@@ -502,7 +507,11 @@ function settleRequest(
   return [
     settle({
       ok: false,
-      error: new Tool.Error({ message: `[browser.${event.outcome.code}] ${event.outcome.message}` }),
+      // The code stays readable apart from the message, so the server acts on it without parsing text.
+      error: new Tool.Error({
+        message: `[browser.${event.outcome.code}] ${event.outcome.message}`,
+        metadata: { code: event.outcome.code },
+      }),
     }),
   ]
 }
@@ -540,7 +549,7 @@ function syncWarning(
 }
 
 /**
- * The session's permissions with exactly one set of browser allows (`allow`) or none, every other rule kept in order.
+ * The session's permissions with exactly one browser grant (`allow`) or none, every other rule kept in order.
  * Undefined when they already are, so a replace writes nothing.
  */
 export function reconcileBrowserPermissions(
@@ -548,12 +557,8 @@ export function reconcileBrowserPermissions(
   allow: boolean,
 ): Permission.Rule[] | undefined {
   const rules = current ?? []
-  const kept = rules.filter(
-    (rule) =>
-      rule.effect !== "allow" ||
-      !ACCESS.some((access) => access.action === rule.action && access.resource === rule.resource),
-  )
-  const next = allow ? [...kept, ...ACCESS.map((rule) => ({ ...rule, effect: "allow" as const }))] : kept
+  const kept = rules.filter((rule) => !isGrant(rule))
+  const next = allow ? [...kept, { ...GRANT }] : kept
   const unchanged =
     next.length === rules.length &&
     next.every(
@@ -566,8 +571,46 @@ export function reconcileBrowserPermissions(
   return unchanged ? undefined : next
 }
 
+/**
+ * One of the allows an attachment grants, or granted in an earlier version, so a revoke or the startup sweep removes
+ * old grants too. A user rule of the same shape cannot be told apart from it.
+ */
+export function isGrant(rule: Permission.Rule) {
+  return (
+    rule.effect === "allow" &&
+    GRANTED.some((granted) => granted.action === rule.action && granted.resource === rule.resource)
+  )
+}
+
+/** Whether `rules` hold an attachment's grant of the browser tools. */
+export function holdsGrant(rules: readonly Permission.Rule[]) {
+  return rules.some((rule) => rule.effect === "allow" && rule.action === GRANT.action && rule.resource === GRANT.resource)
+}
+
+/**
+ * The rule that decides `browser` on `operation`, picked as core's `Permission.evaluate` picks it: the last rule whose
+ * action and resource patterns both match. Undefined when none matches.
+ */
+export function selectBrowserRule(rules: readonly Permission.Rule[], operation: string) {
+  const ignoreCase = process.platform === "win32"
+  return rules.findLast(
+    (rule) =>
+      Wildcard.match("browser", rule.action, ignoreCase) && Wildcard.match(operation, rule.resource, ignoreCase),
+  )
+}
+
+/** Whether `rules` deny the whole browser, which is when core stops listing the browser tools. */
+export function deniesBrowser(rules: readonly Permission.Rule[]) {
+  return Permission.deniesAll("browser", rules, process.platform === "win32")
+}
+
 export function isConnectionDisposed(state: ConnectionState) {
   return state.status === "disposed"
+}
+
+/** Whether the session has an attachment or a permission sync in flight, either of which owns its browser rules. */
+export function hasSession(state: ConnectionState, sessionID: Session.ID) {
+  return state.sessions.has(sessionID)
 }
 
 /** The attempt the next `attach` gets; the driver keys its handle by it before dispatching `attach.started`. */
@@ -606,13 +649,15 @@ export function selectPendingCommand(
   return entry.pending.get(requestID)
 }
 
-/** The attachment and tab a browser tool call targets, or the error the tool returns. */
-export function selectTarget(
+/**
+ * The session's attached connection, or the error a tool call returns while it has none. Reads nothing about its tabs,
+ * so it may answer before the call is authorized.
+ */
+export function selectConnection(
   state: ConnectionState,
   sessionID: Session.ID,
-  action: Browser.Action,
 ):
-  | { readonly ok: true; readonly connectionID: string; readonly tab: Browser.Tab | undefined }
+  | { readonly ok: true; readonly connectionID: string; readonly tabs: readonly Browser.Tab[] }
   | { readonly ok: false; readonly error: Tool.Error } {
   const entry = state.status === "active" ? state.sessions.get(sessionID) : undefined
 
@@ -621,7 +666,7 @@ export function selectTarget(
       ok: false,
       error: new Tool.Error({
         message:
-          "[browser.disconnected] No desktop browser is connected to this session. Open this session in the desktop app and wait for it to connect. Then call browser.tabs.list({}). Repeating browser actions while disconnected will not help.",
+          "No browser is attached to this session. It attaches when the session is open in the OpenCode desktop app. No action ran. Continue without the browser; retry only after it attaches.",
       }),
     }
 
@@ -630,34 +675,60 @@ export function selectTarget(
       ok: false,
       error: new Tool.Error({
         message:
-          "[browser.disconnected] The desktop browser is still connecting to this session; no action ran. Call browser.tabs.list({}) once it finishes connecting.",
-      }),
-    }
-  const tab = "tabID" in action ? entry.browserState.tabs.find((tab) => tab.id === action.tabID) : undefined
-
-  if ("tabID" in action && !tab)
-    return {
-      ok: false,
-      error: new Tool.Error({
-        message:
-          "[browser.tab_unavailable] This tab is closed or does not belong to the connected session. Call browser.tabs.list({}) and use an exact returned tabID. If no tabs exist, use browser.tabs.open({}). Never substitute a request ID, file ID, or element ref for tabID.",
+          "The desktop browser is still connecting to this session. No action ran. Retry only after it attaches.",
       }),
     }
 
-  return { ok: true, connectionID: entry.connectionID, tab }
+  return { ok: true, connectionID: entry.connectionID, tabs: entry.browserState.tabs }
+}
+
+/**
+ * The attachment and tab a browser tool call targets, or the error the tool returns. The error for an unknown tab lists
+ * the session's tabs, so this runs only once the call is authorized.
+ */
+export function selectTarget(
+  state: ConnectionState,
+  sessionID: Session.ID,
+  action: Browser.Action,
+):
+  | { readonly ok: true; readonly connectionID: string; readonly tab: Browser.Tab | undefined }
+  | { readonly ok: false; readonly error: Tool.Error } {
+  const connection = selectConnection(state, sessionID)
+
+  if (!connection.ok) return connection
+  const tab = "tabID" in action ? connection.tabs.find((tab) => tab.id === action.tabID) : undefined
+
+  if ("tabID" in action && !tab) return { ok: false, error: tabUnavailable(action.tabID, connection.tabs) }
+
+  return { ok: true, connectionID: connection.connectionID, tab }
+}
+
+// Lists the session's open tabs, bounded, so the next call can use one directly.
+function tabUnavailable(tabID: Browser.TabID, tabs: readonly Browser.Tab[]) {
+  const listed = tabs
+    .slice(0, 10)
+    .map((tab) => `${tab.id} (${tab.url.length > 100 ? `${tab.url.slice(0, 100)}…` : tab.url})`)
+  const more = tabs.length > listed.length ? `, and ${tabs.length - listed.length} more from browser.tabs.list({})` : ""
+  return new Tool.Error({
+    message: `[browser.tab_unavailable] No open tab in this session has the ID ${tabID}; it was closed or came from another session. ${
+      listed.length
+        ? `Open tabs: ${listed.join(", ")}${more}. Use one of these IDs`
+        : "This session has no open tabs. Open one with browser.tabs.open({ url })"
+    }. Never use a request ID, file ID, or element ref as a tabID.`,
+  })
 }
 
 function disconnectedBeforeDispatch() {
   return new Tool.Error({
     message:
-      "[browser.disconnected] The desktop browser disconnected before this action was sent; no action ran. Reconnect this session in the desktop app, then call browser.tabs.list({}).",
+      "[browser.disconnected] The desktop app disconnected before this action was sent; no action ran. Call browser.tabs.list({}) to check whether it has reconnected before you try again.",
   })
 }
 
 function disconnectedAfterDispatch() {
   return new Tool.Error({
     message:
-      "[browser.disconnected] Browser connection closed; the action may already have run. Reconnect this session in the desktop app, call browser.tabs.list({}), and inspect the target tab with browser.snapshot({tabID}). Do not repeat clicks, submissions, uploads, or evaluations until their outcome is known.",
+      "[browser.disconnected] The desktop app disconnected while this action ran; the action may already have run. Once browser.tabs.list({}) succeeds again, inspect the tab with browser.snapshot({tabID}) before you repeat a click, submission, upload, or evaluation.",
   })
 }
 

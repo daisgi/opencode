@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test"
 import type { CommandOption } from "./command"
+import { keyboardOwned, ownKeyboard } from "@opencode/ui/hooks"
 import { createAppKeymap, registerCommandLayers } from "./keymap"
 
 const cleanup: (() => void)[] = []
@@ -9,7 +10,7 @@ afterEach(() => {
   document.body.replaceChildren()
 })
 
-function setup(options: CommandOption[], input?: { custom?: string[]; blocked?: () => boolean }) {
+function setup(options: CommandOption[], input?: { custom?: string[]; blocked?: (event?: KeyboardEvent) => boolean }) {
   const app = createAppKeymap({
     blocked: input?.blocked ?? (() => false),
     editable: (target) => target instanceof HTMLElement && target.isContentEditable,
@@ -138,6 +139,22 @@ test("keys are left alone while keybinds are blocked", () => {
 
   press(document.body, { key: "k", ctrlKey: true })
   blocked.value = false
+  press(document.body, { key: "k", ctrlKey: true })
+
+  expect(ran).toEqual(["palette"])
+})
+
+// A page prompt in the browser pane registers itself; the app's keys stay off inside it and work everywhere else.
+test("a surface that owns the keyboard keeps command keys from running inside it", () => {
+  const ran: string[] = []
+  setup([command("palette", "mod+k", ran)], { blocked: (event) => keyboardOwned(event?.target ?? null) })
+  const prompt = document.createElement("div")
+  const field = document.createElement("input")
+  prompt.append(field)
+  document.body.append(prompt)
+  cleanup.push(ownKeyboard(prompt))
+
+  press(field, { key: "k", ctrlKey: true })
   press(document.body, { key: "k", ctrlKey: true })
 
   expect(ran).toEqual(["palette"])

@@ -16,7 +16,7 @@ import { PluginHooks } from "./plugin/hooks.js"
 
 const PermissionEffect = Permission.Effect
 export { PermissionEffect as Effect }
-export { Rule, Ruleset } from "@opencode/schema/permission"
+export { Rule, Ruleset, deniesAll } from "@opencode/schema/permission"
 const missingAgentPermissions: Permission.Ruleset = [{ action: "*", resource: "*", effect: "deny" }]
 
 export const ID = Permission.ID
@@ -107,6 +107,44 @@ export function merge(...rulesets: Permission.Ruleset[]): Permission.Ruleset {
   return rulesets.flat()
 }
 
+const Denies = Schema.Array(Schema.Struct({ action: Schema.String, resource: Schema.String }))
+
+/**
+ * The rules for `agent` in `session`: the agent's, then the Session's, then a deny for each entry `experimental.rules`
+ * hooks add. Requests are evaluated against them and steps list tools, skills and MCP servers by them, so what an
+ * agent is offered and what it may call come from one ruleset. Hooks see copies and can only add denies, so a
+ * configured deny stays final and no hook can allow, remove or reorder a rule.
+ */
+export const rules = Effect.fn("Permission.rules")(function* (
+  hooks: PluginHooks.Interface,
+  input: { readonly session: SessionSchema.Info; readonly agent: Agent.Selection },
+) {
+  const base = [...(input.agent.info?.permissions ?? missingAgentPermissions), ...(input.session.permissions ?? [])]
+  // Core owns the list and the event is frozen, so a hook can add a deny but cannot remove or replace another's.
+  const added: unknown[] = []
+  yield* hooks.trigger(
+    "permission",
+    "experimental.rules",
+    Object.freeze({
+      sessionID: input.session.id,
+      agent: input.agent.id,
+      rules: base.map((rule) => ({ ...rule })),
+      session: (input.session.permissions ?? []).map((rule) => ({ ...rule })),
+      deny: (rule: unknown) => {
+        added.push(rule)
+      },
+    }),
+  )
+  // A hook that cannot say what it denies must not leave the request decided without it.
+  const denies = yield* Schema.decodeUnknownEffect(Denies)(added).pipe(
+    Effect.mapError(
+      (error) => new Error(`A permission "experimental.rules" hook added an invalid deny: ${error.message}`),
+    ),
+    Effect.orDie,
+  )
+  return [...base, ...denies.map((rule) => ({ action: rule.action, resource: rule.resource, effect: "deny" as const }))]
+})
+
 export interface Interface {
   readonly close: Effect.Effect<void>
   readonly ask: (input: AssertInput) => Effect.Effect<AskResult, SessionErrors.NotFoundError>
@@ -114,7 +152,7 @@ export interface Interface {
   /** Fails only when the rules deny the request; never asks the user. */
   readonly assertNotDenied: (input: AssertInput) => Effect.Effect<void, BlockedError | SessionErrors.NotFoundError>
   /** True only when the rules already allow the request; never asks the user. */
-  readonly allows: (input: AssertInput) => Effect.Effect<boolean, SessionErrors.NotFoundError>
+  readonly allows: (input: AssertInput, options?: { requireConfiguredAllow: boolean }) => Effect.Effect<boolean, SessionErrors.NotFoundError>
   readonly reply: (input: ReplyInput) => Effect.Effect<void, NotFoundError>
   readonly get: (id: ID) => Effect.Effect<Request | undefined>
   readonly forSession: (sessionID: SessionSchema.ID) => Effect.Effect<ReadonlyArray<Request>>
@@ -175,8 +213,7 @@ const layer = Layer.effect(
     const configured = Effect.fnUntraced(function* (sessionID: SessionSchema.ID, agentID?: Agent.ID) {
       const session = yield* sessions.get(sessionID)
       if (!session) return yield* new SessionErrors.NotFoundError({ sessionID })
-      const agent = yield* agents.resolve(agentID ?? session.agent)
-      return merge(agent?.permissions ?? missingAgentPermissions, session.permissions ?? [])
+      return yield* rules(hooks, { session, agent: yield* agents.select(agentID ?? session.agent) })
     })
 
     function denied(input: Pick<Request, "action" | "resources">, rules: Permission.Ruleset) {
@@ -198,10 +235,14 @@ const layer = Layer.effect(
       return parent ? { ...source, id: parent } : source
     }
 
-    const evaluateInput = Effect.fnUntraced(function* (input: AssertInput) {
+    const evaluateInput = Effect.fnUntraced(function* (input: AssertInput, requireConfiguredAllow = false) {
       const rules = yield* configured(input.sessionID, input.agent)
       if (denied(input, rules)) return { effect: "deny" as const, rules }
-      const all = [...rules, ...(yield* savedRules())]
+      // Passive reads on an agent-driven page must not consume an interactive tool's saved approval for an ask.
+      if (requireConfiguredAllow && input.resources.some(resource => evaluate(input.action, resource, rules).effect !== "allow"))
+        return { effect: "ask" as const, rules }
+      const saved = yield* savedRules()
+      const all = [...rules, ...saved]
       const effects = input.resources.map((resource) => evaluate(input.action, resource, all).effect)
       const effect: Permission.Effect = effects.includes("ask") ? "ask" : "allow"
       const event = yield* hooks.trigger("permission", "evaluate", {
@@ -212,6 +253,10 @@ const layer = Layer.effect(
         metadata: input.metadata,
         source: row(input.source),
         effect,
+        experimental: {
+          approved: input.resources.every((resource) => evaluate(input.action, resource, saved).effect === "allow"),
+          approvedSave: !!input.save?.length && input.save.every((key) => saved.some((rule) => rule.action === input.action && rule.resource === key)),
+        },
       })
       const unattended = yield* Unattended
       if (event.effect !== "ask" || unattended === undefined)
@@ -315,9 +360,9 @@ const layer = Layer.effect(
       })
     })
 
-    const allows = Effect.fn("Permission.allows")(function* (input: AssertInput) {
+    const allows = Effect.fn("Permission.allows")(function* (input: AssertInput, options?: { requireConfiguredAllow: boolean }) {
       if (closed) return false
-      return (yield* evaluateInput(input)).effect === "allow"
+      return (yield* evaluateInput(input, options?.requireConfiguredAllow)).effect === "allow"
     })
 
     const reply = Effect.fn("Permission.reply")((input: ReplyInput) =>

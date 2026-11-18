@@ -19,7 +19,6 @@ import { SessionMessage } from "./session/message.js"
 import { SessionSchema } from "./session/schema.js"
 import { State } from "./state.js"
 import { definition, effectiveName, execute, normalizedName, normalizeContent } from "./tool/runtime.js"
-import { Wildcard } from "./util/wildcard.js"
 
 export class RegistrationError extends Schema.TaggedError<RegistrationError>()("Tool.RegistrationError", {
   name: Schema.String,
@@ -205,16 +204,17 @@ const layer = Layer.effect(
       return yield* executeTool(selected, event.tool, event.input, context)
     })
 
-    let catalog:
-      | {
-          data: Data
-          names: string
-          full: boolean
-          inventory: CodeModeTool.Inventory
-          value: CodeModeCatalog.Inventory
-          definition: ToolDefinition
-        }
-      | undefined
+    // Keyed by the visible tool names. Sessions whose agents see different tool sets, such as one denied the browser
+    // and one not, alternate steps; with one entry each step rebuilt a large catalog (about 90 ms for 3,000 tools).
+    const catalogs = new Map<
+      string,
+      {
+        data: Data
+        inventory: CodeModeTool.Inventory
+        value: CodeModeCatalog.Inventory
+        definition: ToolDefinition
+      }
+    >()
     const state = State.create<Data, Editor>({
       name: "tool",
       initial: () => ({
@@ -255,7 +255,7 @@ const layer = Layer.effect(
         },
       }),
       notify: (value) => {
-        catalog = undefined
+        catalogs.clear()
         return Effect.forEach(
           value.errors,
           ({ kind, name, namespace, error }) =>
@@ -293,8 +293,11 @@ const layer = Layer.effect(
           // Discovery is immutable for a registry revision and visible tool set. Keep executors
           // fresh, but share the inventory, whose prepared runtime and much larger rendered catalog
           // are cached by identity, and the execute tool's definition across steps.
-          const cached =
-            catalog?.data === data && catalog.names === names && catalog.full === full ? catalog : undefined
+          // Whether Code Mode has its full host globals (Node's path, Bun's file API) changes its catalog and
+          // definition, so it is part of the key.
+          const key = `${full ? "full" : ""}\n${names}`
+          const entry = catalogs.get(key)
+          const cached = entry?.data === data ? entry : undefined
           const codeModeInventory = cached?.inventory ?? { tools: codeModeTools, namespaces: data.namespaces }
           const codeModeTool = codeModeEnabled
             ? CodeModeTool.create(
@@ -308,15 +311,17 @@ const layer = Layer.effect(
             ? undefined
             : (cached?.value ?? CodeModeTool.catalog(codeModeInventory))
           const codeModeDefinition = codeModeTool && (cached?.definition ?? definition(codeModeTool))
-          if (codeModeCatalog && codeModeDefinition)
-            catalog = {
+          if (codeModeCatalog && codeModeDefinition) {
+            // Least recently used goes first: a hit moves its entry to the end.
+            catalogs.delete(key)
+            catalogs.set(key, {
               data,
-              names,
-              full,
               inventory: codeModeInventory,
               value: codeModeCatalog,
               definition: codeModeDefinition,
-            }
+            })
+            if (catalogs.size > CATALOG_CACHE_SIZE) catalogs.delete(catalogs.keys().next().value!)
+          }
           return {
             ...(codeModeCatalog === undefined ? {} : { codeModeCatalog }),
             definitions: [
@@ -411,10 +416,11 @@ function commit(editor: Data, id: string, input: Tool.Info & { readonly id: stri
   editor.definitions.set(id, registered.success)
 }
 
-const whollyDisabled = (action: string, rules: Permission.Ruleset) => {
-  const rule = rules.findLast((rule) => Wildcard.match(action, rule.action))
-  return rule?.resource === "*" && rule.effect === "deny"
-}
+/** Visible tool sets whose Code Mode catalog stays prepared. */
+const CATALOG_CACHE_SIZE = 8
+
+const whollyDisabled = (action: string, rules: Permission.Ruleset) =>
+  Permission.deniesAll(action, rules, process.platform === "win32")
 
 const formatSchemaIssue = SchemaIssue.makeFormatterDefault()
 

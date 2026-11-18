@@ -11,7 +11,11 @@ export type AppKeymap = Keymap<HTMLElement, HtmlKeymapEvent>
  * The keymap behind every command keybind. It reads keys in the capture phase on the document root, before the
  * focused element sees them.
  */
-export function createAppKeymap(input: { blocked: () => boolean; editable: (target: EventTarget | null) => boolean }) {
+export function createAppKeymap(input: {
+  /** Whether keybinds are off for this key press, such as while a dialog or a surface owning the keyboard has it. */
+  blocked: (event?: KeyboardEvent) => boolean
+  editable: (target: EventTarget | null) => boolean
+}) {
   const host = createAppKeymapHost(document.documentElement, input.blocked)
   const keymap: AppKeymap = new Keymap(host.host)
   // Every binding is written by `keymapKey`: one `+`-joined combo.
@@ -210,7 +214,7 @@ function physicalKey(event: Pick<KeyboardEvent, "key" | "code">) {
 
 // The HTML host, except that it drops keys while an IME composes or while command keybinds are blocked, and that
 // its owner can destroy it, which disposes the keymap.
-function createAppKeymapHost(root: HTMLElement, blocked: () => boolean) {
+function createAppKeymapHost(root: HTMLElement, blocked: (event?: KeyboardEvent) => boolean) {
   const host = createHtmlKeymapHost(root)
   const destroyed = new Set<() => void>()
   const state = { destroyed: false }
@@ -236,7 +240,7 @@ function createAppKeymapHost(root: HTMLElement, blocked: () => boolean) {
         // Escape, Enter and Tab confirm or cancel IME candidates; Safari can report them as keyCode 229.
         if (original && (original.isComposing || original.keyCode === 229)) return
 
-        if (blocked()) return
+        if (blocked(original)) return
 
         listener(event)
       }),

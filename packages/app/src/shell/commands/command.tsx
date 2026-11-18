@@ -1,5 +1,6 @@
 import { createSimpleContext } from "@opencode/ui/context"
 import { useDialog } from "@opencode/ui/context/dialog"
+import { keyboardOwned } from "@opencode/ui/hooks"
 import { type Accessor, batch, createEffect, createMemo, createSignal, onCleanup, onMount, untrack } from "solid-js"
 import { createStore, produce, reconcile } from "solid-js/store"
 import { Predicate, Schema } from "effect"
@@ -411,7 +412,11 @@ export const { use: useCommand, provider: CommandProvider } = createSimpleContex
 
     const suspended = () => selectKeybindsSuspended(suspendState())
 
-    const app = createAppKeymap({ blocked: () => suspended() || !!dialog.active, editable: isEditableTarget })
+    // A surface that owns the keyboard, such as a page's prompt in the browser pane, is modal for less than the window.
+    const app = createAppKeymap({
+      blocked: (event) => suspended() || !!dialog.active || keyboardOwned(event?.target ?? null),
+      editable: isEditableTarget,
+    })
 
     onCleanup(app.destroy)
 

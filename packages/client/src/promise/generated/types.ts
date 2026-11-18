@@ -4672,6 +4672,17 @@ export type ExperimentalMediaGetInput = { readonly hash: string }
 
 export type ExperimentalMediaGetOutput = globalThis.Uint8Array
 
+export type ExperimentalPreviewReadInput = {
+  readonly location?: { readonly directory?: string | undefined } | undefined
+  readonly sessionID: string
+  readonly path: string
+  readonly document: string
+  readonly root: string
+  readonly entry?: "1" | undefined
+}
+
+export type ExperimentalPreviewReadOutput = globalThis.Uint8Array
+
 export type ExperimentalBlobGetInput = { readonly id: string }
 
 export type ExperimentalBlobGetOutput = globalThis.Uint8Array

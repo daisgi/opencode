@@ -18,6 +18,7 @@ import { Socket } from "effect/socket"
 import { Api } from "../api"
 import { CorsConfig, isAllowedRequestOrigin } from "../cors"
 import { makeArtifact } from "./artifact"
+import { makePreviewRead } from "./preview"
 import { makeBlobGet } from "./blob"
 import { makeAutomation } from "./automation"
 import { makeJob } from "./job"
@@ -30,6 +31,7 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
     const cors = yield* CorsConfig
     const pty = yield* PersistentPty.Service
     const artifact = yield* makeArtifact
+    const previewRead = yield* makePreviewRead
     const job = yield* makeJob
     const mediaGet = yield* makeMediaGet
     const blobGet = yield* makeBlobGet
@@ -37,6 +39,7 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
 
     return handlers
       .handleRaw("media.get", (ctx) => mediaGet(ctx.params.hash, ctx.request))
+      .handleRaw("preview.read", (ctx) => previewRead(ctx.query, ctx.request))
       .handleRaw("blob.get", (ctx) => blobGet(ctx.params.id, ctx.request))
       .handle("job.list", (ctx) => job.list(ctx.query))
       .handle("artifacts.providers", (ctx) => artifact.providers(ctx.query, ctx.request))
