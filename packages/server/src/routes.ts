@@ -31,6 +31,7 @@ import { FSUtil } from "@opencode/util/fs-util"
 import { InstructionDiscovery } from "@opencode/core/instruction-discovery"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { LocationActivity } from "@opencode/core/location-activity"
+import { SessionSearchBuild } from "@opencode/core/session/search-build"
 import { ModelsDev } from "@opencode/core/models-dev"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { Automation } from "@opencode/core/automation"
@@ -94,6 +95,7 @@ const applicationServiceNodes = [
   BlobStore.node,
   // Its polling fibers belong to the server, not to the request that started them.
   VideoGeneration.node,
+  SessionSearchBuild.node,
   Workspace.node,
   FileWatch.node,
 ] as const
