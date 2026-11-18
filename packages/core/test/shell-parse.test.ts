@@ -212,6 +212,7 @@ describe("ShellParse", () => {
         { resource: "export -p > ~/.bashrc", save: "export *" },
       ],
       directories: [],
+      writes: [path.join(os.homedir(), ".zshrc"), path.join(os.homedir(), ".bashrc")],
     })
 
     const methods = await Effect.runPromise(
@@ -224,7 +225,78 @@ describe("ShellParse", () => {
         { resource: '"x" >> ~/.bashrc', save: '"x" *' },
       ],
       directories: [],
+      writes: [path.join(os.homedir(), ".bashrc")],
     })
+  })
+
+  test("extracts the paths a command redirects output into", async () => {
+    const writes = async (command: string, shell = "/bin/bash", cwd = "/workspace") =>
+      (await Effect.runPromise(ShellParse.scan(command, shell, cwd))).writes
+
+    expect(await writes("git status > /tmp/x")).toEqual(["/tmp/x"])
+    expect(await writes("git status >> out")).toEqual(["out"])
+    expect(await writes("git status 2> err")).toEqual(["err"])
+    expect(await writes("git status &> out")).toEqual(["out"])
+    expect(await writes("git status >| out")).toEqual(["out"])
+    expect(await writes("git status <> both")).toEqual(["both"])
+    expect(await writes("git status > 'out file'")).toEqual(["out file"])
+    expect(await writes("git status > ~/out")).toEqual([path.join(os.homedir(), "out")])
+    expect(await writes("git status > a > b")).toEqual(["a", "b"])
+    expect(await writes("printf hello | cat > marker")).toEqual(["marker"])
+    expect(await writes("> out")).toEqual(["out"])
+    expect(await writes("Write-Output hi > out.txt", "pwsh", "C:\\workspace")).toEqual(["out.txt"])
+
+    // Descriptor duplication, here-documents, here-strings, and read redirects name no path the command writes.
+    expect(await writes("git status 2>&1")).toBeUndefined()
+    expect(await writes("git status >&2")).toBeUndefined()
+    expect(await writes("git status < in")).toBeUndefined()
+    expect(await writes("cat <<< 'x'")).toBeUndefined()
+    expect(await writes("cat <<'EOF'\nbody\nEOF")).toBeUndefined()
+    expect(await writes("Get-ChildItem 2>&1", "pwsh", "C:\\workspace")).toBeUndefined()
+    expect(await writes("git status")).toBeUndefined()
+  })
+
+  test("leaves the null and standard devices out of the written paths", async () => {
+    const scan = async (command: string, shell = "/bin/bash", cwd = "/workspace") =>
+      Effect.runPromise(ShellParse.scan(command, shell, cwd))
+
+    for (const command of ["ls nope 2>/dev/null", "ls > /dev/null", "ls > /dev/stdout", "ls > /dev/stderr", "ls > /dev/tty"])
+      expect(await scan(command), command).toEqual({ commands: expect.any(Array), directories: [] })
+
+    expect(await scan("Write-Output hi > $null", "pwsh", "C:\\workspace")).toEqual({
+      commands: expect.any(Array),
+      directories: [],
+    })
+    expect(await scan("Write-Output hi > NUL", "pwsh", "C:\\workspace")).toEqual({
+      commands: expect.any(Array),
+      directories: [],
+    })
+
+    // Real devices and descriptors stay gated.
+    expect((await scan("ls > /dev/sda")).writes).toEqual(["/dev/sda"])
+    expect((await scan("ls > /dev/fd/2")).writes).toEqual(["/dev/fd/2"])
+    expect((await scan("ls > /dev/nullx")).writes).toEqual(["/dev/nullx"])
+  })
+
+  test("marks a redirect target it cannot attribute to a path as unresolved", async () => {
+    const unresolved = async (command: string, shell = "/bin/bash", cwd = "/workspace") =>
+      (await Effect.runPromise(ShellParse.scan(command, shell, cwd))).writesUnresolved
+
+    // Targets the shell only knows at run time.
+    expect(await unresolved("git status > $HOME/out")).toBe(true)
+    expect(await unresolved("git status > $(printf out)")).toBe(true)
+    expect(await unresolved('M=~/.bashrc; git status > "$M"')).toBe(true)
+
+    // A directory change rebases later relative targets, which the scan cannot follow.
+    expect(await unresolved("cd sub && cmd > x")).toBe(true)
+    expect(await unresolved("cd sub; cmd > x")).toBe(true)
+    expect(await unresolved("cd /tmp && cmd > x")).toBe(true)
+
+    // Absolute targets and targets before the change keep their own path.
+    expect(await unresolved("cd sub && cmd > /tmp/x")).toBeUndefined()
+    expect(await unresolved("cd sub && cmd > ~/x")).toBeUndefined()
+    expect(await unresolved("cmd > x && cd sub")).toBeUndefined()
+    expect(await unresolved("cmd > x")).toBeUndefined()
   })
 
   test("extracts PowerShell directory parameters", async () => {
