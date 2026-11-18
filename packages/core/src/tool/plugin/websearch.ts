@@ -3,7 +3,8 @@ export * as WebSearchTool from "./websearch.js"
 import type { Context } from "@opencode/plugin/effect/plugin"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { ToolFailure } from "@opencode/ai/effect"
-import { Effect, Schema, Semaphore } from "effect"
+import { isRecord } from "@opencode/util/record"
+import { Effect, Option, Schema, Semaphore, type JsonSchema } from "effect"
 import { HttpClientError } from "effect/http"
 import { Config } from "../../config.js"
 import { ConfigEntryObserver } from "../../config/plugin/entry-observer.js"
@@ -22,10 +23,15 @@ const httpErrors = new Map([
 
 export const description = `Search the web using the user's selected search integration. Use this for current information beyond knowledge cutoff.
 
+Pass \`providerID\` to pick the search provider for this call; the accepted values are listed in that parameter. Omit it to use the user's saved or random provider, and put the provider there rather than in the query text.
+
 The current year is ${new Date().getFullYear()}. Use this year when searching for recent information or current events.`
 
 export const Input = Schema.Struct({
   query: Schema.String.annotate({ description: "Websearch query" }),
+  providerID: Schema.optionalKey(WebSearch.ID).annotate({
+    description: "Search provider for this call. Omit to use the user's saved or random provider.",
+  }),
 })
 
 const Output = Schema.Array(
@@ -56,13 +62,43 @@ export const Plugin = {
           output: Output,
           execute: (input, context) =>
             Effect.gen(function* () {
-              yield* permission.assert({
+              const requested = input.providerID
+              const approval = {
                 action: name,
                 resources: [input.query],
                 save: ["*"],
                 metadata: input,
                 ...Permission.invocation(context),
-              })
+              }
+              let needsConsent = false
+              if (requested !== undefined) {
+                const providers = (yield* ctx.websearch.providers()).data
+                // A bad ID fails before the approval prompt so it cannot record a saved permission, but a policy
+                // deny still outranks it: `assertNotDenied` evaluates the rules without asking the user.
+                if (!providers.some((provider) => provider.id === requested)) {
+                  yield* permission.assertNotDenied(approval)
+                  return yield* new ToolFailure({
+                    message: `Unknown web search provider "${requested}". Available: ${providers.map((provider) => provider.id).join(", ") || "none"}.`,
+                  })
+                }
+                // A saved "disabled" choice outranks a per-call provider; no saved choice still needs consent.
+                const saved = yield* websearch.default().pipe(Effect.option)
+                if (Option.isNone(saved)) {
+                  yield* permission.assertNotDenied(approval)
+                  return yield* new WebSearch.DisabledError()
+                }
+                needsConsent = saved.value === undefined
+                // A provider the user saved outranks a per-call request: only `random` (or no choice yet) leaves the
+                // routing to the model. Otherwise the request has to agree with the user's choice.
+                const pinned = yield* websearch.selection()
+                if (pinned !== undefined && pinned !== false && pinned !== "random" && pinned !== requested) {
+                  yield* permission.assertNotDenied(approval)
+                  return yield* new ToolFailure({
+                    message: `Web search is pinned to "${pinned}" by the user. Omit providerID or pass "${pinned}".`,
+                  })
+                }
+              }
+              yield* permission.assert(approval)
               const search = (providerID?: WebSearch.ID) =>
                 websearch.query(
                   { ...input, providerID },
@@ -71,7 +107,11 @@ export const Plugin = {
                     onProvider: (provider) => context.progress({ provider: provider.id }),
                   },
                 )
-              const result = yield* search().pipe(
+              // A pinned provider is used as-is: no failover, and consent never overrides it.
+              const attempt: Effect.Effect<WebSearch.Response, WebSearch.Error> = needsConsent
+                ? Effect.fail(new WebSearch.ProviderRequiredError())
+                : search(requested)
+              const result = yield* attempt.pipe(
                 Effect.catchTag("WebSearch.ProviderRequired", () => {
                   return providerSelectionLock
                     .withPermit(
@@ -150,7 +190,8 @@ export const Plugin = {
                         duration: "1 minute",
                         orElse: () => Effect.fail(new Error("Web search cancelled")),
                       }),
-                      Effect.flatMap(search),
+                      // Consent never overrides the provider the model pinned for this call.
+                      Effect.flatMap((providerID) => search(requested ?? providerID)),
                     )
                 }),
               )
@@ -174,6 +215,8 @@ export const Plugin = {
               return { output, content, metadata: { provider: result.providerID } }
             }).pipe(
               Effect.mapError((error) => {
+                // The tool already produced a precise, model-facing message.
+                if (error instanceof ToolFailure) return error
                 const fallback = `Unable to search the web for ${input.query}`
                 if (!Schema.is(WebSearch.RequestError)(error)) return new ToolFailure({ message: fallback, error })
                 const status = HttpClientError.isHttpClientError(error.cause) ? error.cause.response?.status : undefined
@@ -197,8 +240,27 @@ export const Plugin = {
           Effect.as(false),
           Effect.catchTag("WebSearch.Disabled", () => Effect.succeed(true)),
         )
+        if (disabled) return delete event.tools[name]
+        const providers = yield* websearch.providers()
         // Policy can remove every provider, and the model shouldn't be offered a tool that can't search.
-        if (disabled || (yield* websearch.providers()).length === 0) delete event.tools[name]
+        if (providers.length === 0) return delete event.tools[name]
+        // The accepted ids are published here because a tool definition converts its schema once at registration.
+        // With `full_codemode` enabled this tool moves to the Code Mode catalog, which renders and caches its own
+        // schema from the registry, so the enum only reaches the model for a direct tool call; an unknown id still
+        // fails with the list of available ones below.
+        const tool = event.tools[name]
+        const properties = tool?.input.properties
+        if (!tool || !isRecord(properties)) return
+        tool.input = {
+          ...tool.input,
+          properties: {
+            ...properties,
+            providerID: {
+              type: "string",
+              enum: Array.from(new Set(providers.map((provider) => provider.id))).toSorted(),
+            },
+          } satisfies JsonSchema.JsonSchema,
+        }
       })
     yield* ctx.session.hook("context", hook)
     yield* ctx.session.hook("compaction", hook)
