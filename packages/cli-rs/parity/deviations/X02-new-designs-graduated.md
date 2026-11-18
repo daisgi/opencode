@@ -1,0 +1,28 @@
+# X02: the Experiments dialog does not list "New designs"
+
+## TypeScript
+
+The Experiments dialog lists `New designs` (`packages/tui/src/component/dialog-experiments.tsx:17-28`), and
+`experimental["new-designs"]` (`useNewDesigns()`, `packages/tui/src/config/index.tsx:394-396`) switches the
+theme list, the dialog kit, autocomplete, the agent accent step, and many dialogs between two designs. Off is the
+default.
+
+## Rust
+
+The Rust client draws the new designs only, whatever the config says (`decisions.md`, "Design target"). The
+experiment is graduated as `packages/tui/AGENTS.md` describes: its registry entry and gates are gone, and the
+registry, dialog, and `experimental.<id>` persistence stay. A `cli.json` that sets `new-designs` is read and
+written unchanged; the value has no effect.
+
+## Reason
+
+User decision: "designs should fit that and only that". Every P-COMP and P-APP fixture is recorded from the TS TUI
+with the experiment on (`parity/lib/app.ts` `withNewDesigns`), and `parity/component/E.18a-settings.tsx` records
+the Experiments dialog with the same registry as Rust, without the `new-designs` entry.
+`parity/scenarios/D131/designs.pty.ts` drives the difference with the config a release starts with: the palette
+searches in its title row ("Search commands") where TS shows a "Commands" title above a "Search" field, and `/debug`
+copies with `c` where TS copies with Enter. `parity/scenarios/D131/plugins-release.pty.ts` drives a list that
+overflows: TS's old `DialogSelect` keeps every row for options, where the new design gives the last row to a "…"
+indicator, so `/plugins` lists one more plugin in TS (4 lines). `D131/plugins.pty.ts` runs the same list with the
+experiment on, and the two clients are equal. The plugins field test saw these palette and `/plugins` differences
+(`steps/plugins-field-test.md`, "Not plugin defects").
