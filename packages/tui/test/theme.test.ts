@@ -5,7 +5,7 @@ import type { TerminalColors } from "@opentui/core"
 import { allThemes, hasTheme, getOpenCodeTheme, parseTheme, resolveTheme } from "../src/theme"
 import { discoverThemes } from "../src/theme/discovery"
 import { configDirectories } from "../src/util/config-directories"
-import { terminalMode } from "../src/theme/system"
+import { paletteMatchesMode, terminalMode } from "../src/theme/system"
 import opencodeSource from "../src/theme/assets/opencode.json" with { type: "json" }
 import type { ThemeV1Json } from "@opencode/theme/tui/v1"
 import { tmpdir } from "./fixture/fixture"
@@ -51,9 +51,7 @@ test("decodes native V2 themes lazily once", () => {
 })
 
 test("rejects invalid V2 themes when parsing", () => {
-  expect(() => parseTheme({ light: { categorical: [] } }, "invalid-v2")).toThrow(
-    "Invalid theme: invalid-v2",
-  )
+  expect(() => parseTheme({ light: { categorical: [] } }, "invalid-v2")).toThrow("Invalid theme: invalid-v2")
 })
 
 test("rejects invalid V1 themes when parsing", () => {
@@ -120,6 +118,14 @@ test("terminalMode derives mode from refreshed background", () => {
 
 test("terminalMode does not derive mode from ANSI slot zero", () => {
   expect(terminalMode(terminalColors(null, ["#000000"]))).toBeUndefined()
+})
+
+test("paletteMatchesMode compares the palette background with the mode", () => {
+  expect(paletteMatchesMode(terminalColors("#1a1b26"), "dark")).toBeTrue()
+  expect(paletteMatchesMode(terminalColors("#fbf1c7"), "light")).toBeTrue()
+  expect(paletteMatchesMode(terminalColors("#1a1b26"), "light")).toBeFalse()
+  expect(paletteMatchesMode(terminalColors("#fbf1c7"), "dark")).toBeFalse()
+  expect(paletteMatchesMode(terminalColors(null), "light")).toBeTrue()
 })
 
 test("custom theme precedence follows directory order", async () => {
