@@ -17346,6 +17346,9 @@
               "full_codemode": {
                 "type": "boolean"
               },
+              "openai_compatible_discovery": {
+                "type": "boolean"
+              },
               "schedules": {
                 "type": "boolean"
               },

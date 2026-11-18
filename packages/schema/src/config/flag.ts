@@ -20,6 +20,8 @@ export const registry = {
     "Enable experimental MCP Events, a draft MCP extension: declare support to MCP servers and read the events of servers that offer them.",
   full_codemode:
     "Enable the full Code Mode work in progress. Off by default in every build, including local and dev; opt in with OPENCODE_FLAGS=full_codemode or experimental.full_codemode: true.",
+  openai_compatible_discovery:
+    "Add the models that OpenAI-compatible providers in config list at `GET {baseURL}/models`, so they do not have to be listed by hand.",
 } as const satisfies Record<string, string>
 export type Key = keyof typeof registry
 
