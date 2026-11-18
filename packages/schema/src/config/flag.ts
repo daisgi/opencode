@@ -9,6 +9,7 @@ export const wildcard = "all"
  */
 export const registry = {
   todo: "Enable the experimental todowrite tool.",
+  advisor: "Enable the experimental advisor tool and /advisor picker: a second model the session model can consult.",
   media_blob: "Store new session media once in a deduplicated blob table instead of inline in every message row.",
   automations:
     "Run a prompt or Code Mode action on a timer, or on a connected MCP server's push event when mcp_events is enabled.",
