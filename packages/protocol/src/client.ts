@@ -106,12 +106,14 @@ export const deprecatedClientPaths = new Set([
 ])
 
 export const promiseOmitEndpoints = new Set([
+  "server.confirm",
   "pty.connect",
   "persistentPty.connect",
   "mcp.client",
   "generate.textLegacy",
 ])
 export const effectOmitEndpoints = new Set([
+  "server.confirm",
   "fs.read",
   "fs.write",
   "media.get",
