@@ -44,6 +44,7 @@ const it = testEffect(
       Generate.Service.of({
         text: () => Effect.succeed(""),
         image: () => Effect.die("unused"),
+        checkImage: () => Effect.void,
         decisions: () => Effect.die("unused"),
         video: {
           start: (input) =>
@@ -117,7 +118,8 @@ const setup = (providerID = "test") =>
     const notice = (result: { readonly metadata?: Record<string, unknown> }) =>
       Effect.sync(() => notices.find((item) => item.metadata?.jobID === result.metadata?.jobID)).pipe(
         Effect.repeat({ until: (item) => item !== undefined, schedule: Schedule.spaced("5 millis") }),
-        Effect.timeout("10 seconds"),
+        // The first status check and the wait each run every 5 seconds.
+        Effect.timeout("20 seconds"),
         Effect.map((item) => item?.text),
       )
     return { session, run, notice, directory: location.directory }
