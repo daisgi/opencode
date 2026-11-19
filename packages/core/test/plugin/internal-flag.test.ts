@@ -52,6 +52,7 @@ const instances = Layer.effect(
             check: () => Effect.succeed(false),
             update: unexpected,
             which: () => Effect.undefined,
+            pin: () => Effect.void,
           }),
         ),
       ),
