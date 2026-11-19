@@ -30,6 +30,7 @@ import {
   selectThumbVisible,
   transitionScrollThumb,
   type ScrollAxis,
+  type ScrollThumbCapture,
   type ScrollThumbEvent,
   type ScrollThumbState,
 } from "./scroll-view-machine"
@@ -121,6 +122,8 @@ export function scrollTopFromThumbPointer(input: {
   thumbHeight: number
   /** Viewport height used for max scroll. Defaults to `clientHeight` (track == viewport). */
   scrollClientHeight?: number
+  /** Added to `scrollHeight` when rendering the thumb (virtualized rows resizing above the viewport). */
+  scrollAdjustment?: number
 }) {
   return scrollOffsetFromThumbPointer({
     pointer: input.pointer,
@@ -130,6 +133,7 @@ export function scrollTopFromThumbPointer(input: {
     scrollSize: input.scrollHeight,
     thumbSize: input.thumbHeight,
     scrollClientSize: input.scrollClientHeight,
+    scrollAdjustment: input.scrollAdjustment,
   })
 }
 
@@ -142,6 +146,8 @@ export function scrollOffsetFromThumbPointer(input: {
   thumbSize: number
   scrollClientSize?: number
   reverse?: boolean
+  /** Added to `scrollSize` when rendering the thumb (virtualized rows resizing above the viewport). */
+  scrollAdjustment?: number
 }) {
   return thumbScrollOffset(
     input.pointer - input.viewportStart - input.grabOffset,
@@ -150,7 +156,57 @@ export function scrollOffsetFromThumbPointer(input: {
     input.thumbSize,
     input.scrollClientSize ?? input.clientSize,
     input.reverse ?? false,
+    input.scrollAdjustment ?? 0,
   )
+}
+
+export function scrollOffsetFromThumbDrag(input: {
+  pointer: number
+  trackStart: number
+  grabOffset: number
+  capture: ScrollThumbCapture
+  /** The vertical scroll adjustment as it stands when the move is handled, after any reconciliation. */
+  liveAdjustment: number
+  liveScrollSize: number
+  liveClientSize: number
+  reverse?: boolean
+}) {
+  return thumbDragOffset(
+    input.pointer - input.trackStart - input.grabOffset,
+    input.capture,
+    input.liveAdjustment,
+    input.liveScrollSize,
+    input.liveClientSize,
+    input.reverse ?? false,
+  )
+}
+
+// Scalar arguments plus the drag's capture, which is allocated once when the drag starts, so a
+// drag's `pointermove` builds no options object.
+function thumbDragOffset(
+  thumbOffset: number,
+  capture: ScrollThumbCapture,
+  liveAdjustment: number,
+  liveScrollSize: number,
+  liveClientSize: number,
+  reverse: boolean,
+) {
+  const captured = thumbScrollOffset(
+    thumbOffset,
+    capture.trackSize,
+    capture.scrollSize,
+    capture.thumbSize,
+    capture.clientSize,
+    reverse,
+    capture.adjustment,
+  )
+
+  // The captured offset is in the geometry the drag started in. Reconciliation since the grab (the
+  // timeline's flush) moved the adjustment into the native offset, so shift by the change and clamp
+  // to the range the viewport has now.
+  const shifted = captured + capture.adjustment - liveAdjustment
+
+  return Math.max(0, Math.min(shifted, Math.max(0, liveScrollSize - liveClientSize)))
 }
 
 // Scalar arguments, so a drag's `pointermove` builds no options object.
@@ -161,6 +217,7 @@ function thumbScrollOffset(
   thumbSize: number,
   scrollClientSize: number,
   reverse: boolean,
+  scrollAdjustment = 0,
 ) {
   const padding = 8
   const maxThumbStart = clientSize - padding * 2 - thumbSize
@@ -170,7 +227,12 @@ function thumbScrollOffset(
   const thumbStart = Math.max(0, Math.min(thumbOffset - padding, maxThumbStart))
   const progress = reverse ? 1 - thumbStart / maxThumbStart : thumbStart / maxThumbStart
 
-  return progress * Math.max(0, scrollSize - scrollClientSize)
+  // The thumb is rendered from `scrollTop + scrollAdjustment` over `scrollSize + scrollAdjustment`,
+  // so dragging must invert that mapping: use the adjusted range, then subtract the adjustment.
+  const offset = progress * Math.max(0, scrollSize + scrollAdjustment - scrollClientSize)
+  const maxScroll = Math.max(0, scrollSize - scrollClientSize)
+
+  return Math.max(0, Math.min(offset - scrollAdjustment, maxScroll))
 }
 
 /**
@@ -360,6 +422,19 @@ export function ScrollView(props: ScrollViewProps) {
     if (e.button !== 0) return
     e.preventDefault()
     e.stopPropagation()
+    const vertical = axis === "vertical"
+    const track = thumbMount() ?? viewportRef
+    // Capture the geometry the thumb is rendered with before prepareScroll reconciles it: the
+    // timeline's onBeforeScroll transfers the scroll adjustment into the native offset and zeroes
+    // it, so a drag that read the adjustment afterwards could not invert the rendering mapping.
+    const capture: ScrollThumbCapture = {
+      trackSize: vertical ? track.clientHeight : track.clientWidth,
+      scrollSize: vertical ? viewportRef.scrollHeight : viewportRef.scrollWidth,
+      thumbSize: vertical ? state.verticalThumbSize : state.horizontalThumbSize,
+      clientSize: vertical ? viewportRef.clientHeight : viewportRef.clientWidth,
+      adjustment: vertical ? (local.verticalScrollAdjustment ?? 0) : 0,
+    }
+
     prepareScroll()
     const rect = e.currentTarget.getBoundingClientRect()
 
@@ -367,8 +442,9 @@ export function ScrollView(props: ScrollViewProps) {
       type: "drag.started",
       axis,
       pointerId: e.pointerId,
-      grabOffset: axis === "vertical" ? e.clientY - rect.top : e.clientX - rect.left,
+      grabOffset: vertical ? e.clientY - rect.top : e.clientX - rect.left,
       rtl: axis === "horizontal" && getComputedStyle(viewportRef).direction === "rtl",
+      capture,
     })
 
     if (e.isTrusted && selectDraggingAxis(untrack(thumbState)) === axis) e.currentTarget.setPointerCapture(e.pointerId)
@@ -383,11 +459,11 @@ export function ScrollView(props: ScrollViewProps) {
     const track = thumbMount() ?? viewportRef
     const rect = track.getBoundingClientRect()
 
-    const offset = thumbScrollOffset(
-      vertical ? e.clientY - rect.top - drag.grabOffset : e.clientX - rect.left - drag.grabOffset,
-      vertical ? track.clientHeight : track.clientWidth,
+    const offset = thumbDragOffset(
+      (vertical ? e.clientY - rect.top : e.clientX - rect.left) - drag.grabOffset,
+      drag.capture,
+      vertical ? (local.verticalScrollAdjustment ?? 0) : 0,
       vertical ? viewportRef.scrollHeight : viewportRef.scrollWidth,
-      vertical ? state.verticalThumbSize : state.horizontalThumbSize,
       vertical ? viewportRef.clientHeight : viewportRef.clientWidth,
       drag.rtl,
     )
