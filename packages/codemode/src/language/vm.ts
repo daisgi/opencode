@@ -37,6 +37,7 @@ import {
   Native,
   type NativeResult,
   Obj,
+  parseArrayIndex,
   Position,
   PromiseObj,
   readonly,
@@ -735,9 +736,11 @@ export class Vm {
             // Op.PUT_PROP
             const v = regs[--sp] as Value
             const o = regs[sp - 1] as Value
+            const key = consts[w >>> 16] as string
             frame.pc = pc
             frame.sp = sp
-            this.execPutProp(fcode, o, consts[w >>> 16] as string, v, pc)
+            if (key === "length" && this.execSetLength(frame, o, v, pc, sp)) continue outer
+            this.execPutProp(fcode, o, key, v, pc)
             regs[sp - 1] = v
             pc++
             continue
@@ -773,6 +776,7 @@ export class Vm {
             }
             frame.pc = pc
             frame.sp = sp
+            if (keyVal === "length" && this.execSetLength(frame, o, v, pc, sp)) continue outer
             this.execPutElem(fcode, o, keyVal, v, pc)
             regs[sp - 1] = v
             pc++
@@ -816,8 +820,15 @@ export class Vm {
             // Op.IN
             const rhs = regs[--sp] as Value
             const lhs = regs[sp - 1] as Value
-            if (typeof lhs === "number" && lhs >= 0 && (lhs | 0) === lhs && rhs instanceof ArrCtor) {
-              regs[sp - 1] = lhs in rhs.items
+            // A present element; a hole or an index past the end may still be inherited.
+            if (
+              typeof lhs === "number" &&
+              lhs >= 0 &&
+              (lhs | 0) === lhs &&
+              rhs instanceof ArrCtor &&
+              lhs in rhs.items
+            ) {
+              regs[sp - 1] = true
               pc++
               continue
             }
@@ -1484,7 +1495,7 @@ export class Vm {
   }
 
   private execToKey(frame: Frame, v: Value, pc: number, sp: number): boolean {
-    if (!(v instanceof Obj) || isOpaque(v)) {
+    if (!(v instanceof Obj)) {
       frame.regs[sp - 1] = coerceToString(v)
       return false
     }
@@ -1603,7 +1614,7 @@ export class Vm {
     const fcode = frame.code
     frame.pc = pc
     frame.sp = sp
-    if (v instanceof Obj && !isOpaque(v)) {
+    if (v instanceof Obj) {
       frame.sp = sp - 1
       this.pushInternalCall(helper, [flag, v], fcode.siteAt(pc) ?? frame.origin)
       return true
@@ -1623,7 +1634,7 @@ export class Vm {
   }
 
   private execToStringSlow(frame: Frame, flag: number, v: Value, pc: number, sp: number): boolean {
-    if (flag === 1 || !(v instanceof Obj) || isOpaque(v)) {
+    if (flag === 1 || !(v instanceof Obj)) {
       frame.regs[sp - 1] = coerceToString(v)
       return false
     }
@@ -1711,21 +1722,10 @@ export class Vm {
   }
 
   private execNew(frame: Frame, n: number, pc: number, sp: number): number {
-    const fcode = frame.code
     const regs = frame.regs
-    if (n === 255) {
-      const callee = regs[sp - 1] as Value
-      if (!(callee instanceof Builtin) || callee.construct === undefined) {
-        frame.pc = pc
-        frame.sp = sp
-        throw notConstructible(callee, fcode.siteAt(pc) as NewExpression)
-      }
-      frame.sp = sp
-      return 0
-    }
     frame.pc = pc
     const base = sp - n
-    const callee = regs[base - 1] as Builtin
+    const callee = this.constructible(frame, regs[base - 1] as Value, pc, sp)
     const args = regs.slice(base, sp) as Array<Value>
     frame.sp = base - 1
     return this.execConstruct(frame, callee, args, callSiteOf(frame, pc))
@@ -1733,11 +1733,18 @@ export class Vm {
 
   private execNewSpread(frame: Frame, pc: number, sp: number): number {
     const regs = frame.regs
-    const argsArr = regs[--sp] as Arr
-    const callee = regs[--sp] as Builtin
     frame.pc = pc
-    frame.sp = sp
+    const callee = this.constructible(frame, regs[sp - 2] as Value, pc, sp)
+    const argsArr = regs[--sp] as Arr
+    frame.sp = --sp
     return this.execConstruct(frame, callee, [...argsArr.items], callSiteOf(frame, pc))
+  }
+
+  // IsConstructor, checked once the arguments are evaluated.
+  private constructible(frame: Frame, callee: Value, pc: number, sp: number): Builtin {
+    if (callee instanceof Builtin && callee.construct !== undefined) return callee
+    frame.sp = sp
+    throw notConstructible(callee, frame.code.siteAt(pc) as NewExpression)
   }
 
   private execIterStepSlow(frame: Frame, custom: CustomIter, bx: number, pc: number, sp: number): boolean {
@@ -1925,11 +1932,13 @@ export class Vm {
       }
       childCells = arr
     }
-    const fn = new Fn(this.ctx.builtins.Function, childCode, childCells)
-    if ((childCode.flags & CodeFlags.GENERATOR) !== 0) {
-      const isAsync = (childCode.flags & CodeFlags.ASYNC) !== 0
-      define(fn, "prototype", new Obj(isAsync ? this.ctx.builtins.AsyncGenerator : this.ctx.builtins.Generator), hidden)
+    const builtins = this.ctx.builtins
+    const isAsync = (childCode.flags & CodeFlags.ASYNC) !== 0
+    if ((childCode.flags & CodeFlags.GENERATOR) === 0) {
+      return new Fn(isAsync ? builtins.AsyncFunction : builtins.Function, childCode, childCells)
     }
+    const fn = new Fn(isAsync ? builtins.AsyncGeneratorFunction : builtins.GeneratorFunction, childCode, childCells)
+    define(fn, "prototype", new Obj(isAsync ? builtins.AsyncGenerator : builtins.Generator), hidden)
     return fn
   }
 
@@ -2032,7 +2041,7 @@ export class Vm {
     const site = frame.code.siteAt(pc)!
     const memberNode = site as MemberExpression
     if (mode !== 2) requireMemberBase(memberNode, o, keyVal)
-    if (keyVal instanceof Obj && !isOpaque(keyVal)) {
+    if (keyVal instanceof Obj) {
       frame.sp = sp - 2
       this.pushInternalCall("$vmGetElem", [o, keyVal], memberNode.property ?? site)
       return true
@@ -2082,6 +2091,14 @@ export class Vm {
     }
   }
 
+  // ArraySetLength converts an object through its own valueOf/toString: `[o, v] -> [v]` once the prelude has set it.
+  private execSetLength(frame: Frame, o: Value, v: Value, pc: number, sp: number): boolean {
+    if (!(o instanceof Arr) || !(v instanceof Obj)) return false
+    frame.sp = sp - 1
+    this.pushInternalCall("$vmSetLength", [o, v], frame.code.siteAt(pc) ?? frame.origin)
+    return true
+  }
+
   private execPutElem(fcode: Code, o: Value, keyVal: Value, v: Value, pc: number): void {
     this.execPutProp(fcode, o, propertyKey(keyVal), v, pc)
   }
@@ -2089,6 +2106,13 @@ export class Vm {
   private execDeleteProp(fcode: Code, o: Value, key: PropertyKey, pc: number): boolean {
     const site = fcode.siteAt(pc)!
     const ref = this.resolveMember(o, key, site)
+    // A primitive base deletes from its wrapper, whose only own properties are a string's indexes and length.
+    if (!(ref instanceof HostNamespace) && !(o instanceof Obj)) {
+      const index = typeof key === "symbol" ? undefined : parseArrayIndex(key)
+      const own = typeof o === "string" && (key === "length" || (index !== undefined && index < o.length))
+      if (own) throw typeError(`Cannot delete property '${String(key)}' of ${JSON.stringify(o)}.`, site)
+      return true
+    }
     if (ref instanceof HostNamespace || "value" in ref || ref.receiver !== ref.target) {
       throw invalidData("Only data fields may be deleted.", site)
     }
@@ -2099,7 +2123,7 @@ export class Vm {
   private execDeleteElem(frame: Frame, o: Value, keyVal: Value, pc: number, sp: number): boolean {
     const site = frame.code.siteAt(pc)!
     requireMemberBase(site as MemberExpression, o, keyVal)
-    if (keyVal instanceof Obj && !isOpaque(keyVal)) {
+    if (keyVal instanceof Obj) {
       frame.sp = sp - 1
       this.pushInternalCall("$vmDeleteElem", [o, keyVal], site)
       return true
@@ -2110,7 +2134,11 @@ export class Vm {
   }
 
   private execCheckBase(fcode: Code, kind: number, bx: number, regs: Array<unknown>, sp: number, pc: number): void {
-    const base = regs[kind === CheckBaseKind.READ || kind === CheckBaseKind.WRITE_ELEM ? sp - 2 : sp - 1] as Value
+    const base = regs[
+      kind === CheckBaseKind.READ || kind === CheckBaseKind.WRITE_ELEM || kind === CheckBaseKind.ASSIGN_PROP
+        ? sp - 2
+        : sp - 1
+    ] as Value
     if (base instanceof Obj && !(base instanceof PromiseObj)) return
     const site = fcode.siteAt(pc)!
     if (kind === CheckBaseKind.DESTRUCTURE) {
@@ -2124,7 +2152,7 @@ export class Vm {
       requireMemberBase(memberNode, base, regs[sp - 1] as Value)
       return
     }
-    const key = kind === CheckBaseKind.WRITE_PROP ? (fcode.consts[bx] as string) : propertyKey(regs[sp - 1] as Value)
+    const key = kind === CheckBaseKind.WRITE_ELEM ? propertyKey(regs[sp - 1] as Value) : (fcode.consts[bx] as string)
     readReference(writableReference(this.resolveMember(base, key, site), memberNode), memberNode)
   }
 
@@ -2154,7 +2182,7 @@ export class Vm {
     }
     const fcode = frame.code
     const site = fcode.siteAt(pc) ?? frame.origin
-    if (v instanceof Obj && !isOpaque(v)) {
+    if (v instanceof Obj) {
       frame.sp = sp - 1
       this.pushInternalCall("$vmUnary", [sub, v], site)
       return true
@@ -2681,6 +2709,7 @@ export class Vm {
       case Op.PUT_PROP: {
         const v = regs[--sp] as Value
         frame.sp = sp
+        if (consts[bx] === "length" && this.execSetLength(frame, regs[sp - 1] as Value, v, pc, sp)) return -1
         this.execPutProp(fcode, regs[sp - 1] as Value, consts[bx] as string, v, pc)
         regs[sp - 1] = v
         return pc + 1
@@ -2689,6 +2718,7 @@ export class Vm {
         const v = regs[--sp] as Value
         const keyVal = regs[--sp] as Value
         frame.sp = sp
+        if (keyVal === "length" && this.execSetLength(frame, regs[sp - 1] as Value, v, pc, sp)) return -1
         this.execPutElem(fcode, regs[sp - 1] as Value, keyVal, v, pc)
         regs[sp - 1] = v
         return pc + 1
