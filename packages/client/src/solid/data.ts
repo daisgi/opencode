@@ -241,9 +241,12 @@ function createSync() {
     return entry.promise
   }
   return {
-    run(key: string, load: () => Promise<void>) {
+    run(key: string, load: () => Promise<void>, onCacheHit?: () => void) {
       const active = state.get(key)
-      if (active === true) return Promise.resolve()
+      if (active === true) {
+        onCacheHit?.()
+        return Promise.resolve()
+      }
       if (!active) return start(key, load)
       if (!active.invalidated) return active.promise
       return start(key, load, active.promise)
@@ -1825,13 +1828,30 @@ export function createData(config: CreateDataInput) {
         })
       },
       sync(sessionID: string, options?: { children?: boolean }) {
-        return sync.run(options?.children ? `session.family:${sessionID}` : `session:${sessionID}`, async () => {
+        if (options?.children) {
+          return sync.run(`session.family:${sessionID}`, async () => {
+            const started = deletionEpoch
+            const [, children] = await Promise.all([
+              result.session.sync(sessionID),
+              listChildren({ parentID: sessionID, order: "desc", limit: CHILD_PAGE }),
+            ])
+            const sessions = children.filter((session) => (deletedAt.get(session.id) ?? 0) <= started)
+            batch(() => {
+              setStore("session", "info", produce((draft) => {
+                for (const session of sessions) draft[session.id] = session
+              }))
+              for (const session of sessions) {
+                clearDeleted(session.id)
+                sync.complete(`session:${session.id}`)
+                registerSession(session.id)
+              }
+            })
+          })
+        }
+        return sync.run(`session:${sessionID}`, async () => {
           const started = deletionEpoch
-          const [info, children] = await Promise.all([
-            api().session.get({ sessionID }).catch(evictMissing),
-            options?.children ? listChildren({ parentID: sessionID, order: "desc", limit: CHILD_PAGE }) : [],
-          ])
-          const sessions = [info, ...children].filter((session) => (deletedAt.get(session.id) ?? 0) <= started)
+          const info = await api().session.get({ sessionID }).catch(evictMissing)
+          const sessions = [info].filter((session) => (deletedAt.get(session.id) ?? 0) <= started)
           batch(() => {
             setStore(
               "session",
@@ -1877,43 +1897,47 @@ export function createData(config: CreateDataInput) {
             ),
           )
         },
-        sync(sessionID: string) {
-          return sync.run(`session.message:${sessionID}`, async () => {
-            const started = deletionEpoch
-            const response = await api()
-              .message.list({
-                sessionID,
-                limit: config.initialMessageLimit?.() ?? messagePageLimit,
-                order: "desc",
+        sync(sessionID: string, onCacheHit?: () => void) {
+          return sync.run(
+            `session.message:${sessionID}`,
+            async () => {
+              const started = deletionEpoch
+              const response = await api()
+                .message.list({
+                  sessionID,
+                  limit: config.initialMessageLimit?.() ?? messagePageLimit,
+                  order: "desc",
+                })
+                .catch(evictMissing)
+              if ((deletedAt.get(sessionID) ?? 0) > started) return
+              const fetched = response.data.toReversed().map(stored)
+              // Same protection as the pending sync: a re-fetch racing an
+              // admission must not wipe its local transcript row.
+              const ids = new Set(fetched.map((item) => item.id))
+              const admitted = new Set(
+                (store.session.pending[sessionID] ?? []).flatMap((item) =>
+                  item.type === "user" || item.type === "synthetic" ? [item.id] : [],
+                ),
+              )
+              const local = (store.session.message[sessionID] ?? []).filter(
+                (item) => !ids.has(item.id) && (outbox.has(item.id) || admitted.has(item.id)),
+              )
+              const messages = local.length === 0 ? fetched : [...fetched, ...local]
+              // The transcript only holds delivered input, so a pending row it contains missed its
+              // inbox.delivered event (and maybe its enqueued echo) while the event stream was down.
+              const delivered = [...admitted].filter((id) => ids.has(id))
+              batch(() => {
+                delivered.forEach((id) => {
+                  outbox.delete(id)
+                  removePending(sessionID, id)
+                })
+                messageIndex.set(sessionID, new Map(messages.map((message, index) => [message.id, index])))
+                setStore("session", "message", sessionID, reconcile(messages))
+                setStore("session", "messageCursor", sessionID, response.cursor.next ?? undefined)
               })
-              .catch(evictMissing)
-            if ((deletedAt.get(sessionID) ?? 0) > started) return
-            const fetched = response.data.toReversed().map(stored)
-            // Same protection as the pending sync: a re-fetch racing an
-            // admission must not wipe its local transcript row.
-            const ids = new Set(fetched.map((item) => item.id))
-            const admitted = new Set(
-              (store.session.pending[sessionID] ?? []).flatMap((item) =>
-                item.type === "user" || item.type === "synthetic" ? [item.id] : [],
-              ),
-            )
-            const local = (store.session.message[sessionID] ?? []).filter(
-              (item) => !ids.has(item.id) && (outbox.has(item.id) || admitted.has(item.id)),
-            )
-            const messages = local.length === 0 ? fetched : [...fetched, ...local]
-            // The transcript only holds delivered input, so a pending row it contains missed its
-            // inbox.delivered event (and maybe its enqueued echo) while the event stream was down.
-            const delivered = [...admitted].filter((id) => ids.has(id))
-            batch(() => {
-              delivered.forEach((id) => {
-                outbox.delete(id)
-                removePending(sessionID, id)
-              })
-              messageIndex.set(sessionID, new Map(messages.map((message, index) => [message.id, index])))
-              setStore("session", "message", sessionID, reconcile(messages))
-              setStore("session", "messageCursor", sessionID, response.cursor.next ?? undefined)
-            })
-          })
+            },
+            onCacheHit,
+          )
         },
         more(sessionID: string) {
           return store.session.messageCursor[sessionID] !== undefined

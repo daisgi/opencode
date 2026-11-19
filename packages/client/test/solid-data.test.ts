@@ -52,6 +52,44 @@ test("uses the configured initial window and retains normal cursor page sizes", 
   }
 })
 
+test("calls the message sync callback only for a completed cache hit", async () => {
+  const started = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const hits: string[] = []
+  const api = OpenCode.make({
+    baseUrl: "http://opencode.local",
+    fetch: async () => {
+      started.resolve()
+      await release.promise
+      return Response.json({ data: [], cursor: {} })
+    },
+  })
+  const setup = createRoot((dispose) => ({
+    data: createData({ api: () => api, directory: "/project", event: { on: () => () => {}, listen: () => () => {} } }),
+    dispose,
+  }))
+  try {
+    const cold = setup.data.session.message.sync("ses_refresh", () => hits.push("cold"))
+    await started.promise
+    const joined = setup.data.session.message.sync("ses_refresh", () => hits.push("joined"))
+    expect(hits).toEqual([])
+    release.resolve()
+    await Promise.all([cold, joined])
+    expect(hits).toEqual([])
+
+    const cached = setup.data.session.message.sync("ses_refresh", () => hits.push("cached"))
+    expect(hits).toEqual(["cached"])
+    await cached
+
+    setup.data.session.message.invalidate("ses_refresh")
+    await setup.data.session.message.sync("ses_refresh", () => hits.push("refetch"))
+    expect(hits).toEqual(["cached"])
+  } finally {
+    release.resolve()
+    setup.dispose()
+  }
+})
+
 test("counts every subagent page in a root session's cost", async () => {
   const child = (index: number): SessionInfo => ({
     ...session(0),
@@ -87,7 +125,7 @@ test("counts every subagent page in a root session's cost", async () => {
   }))
 
   try {
-    await setup.data.session.sync("ses_root", { children: true })
+    await Promise.all([setup.data.session.sync("ses_root", { children: true }), setup.data.session.sync("ses_root")])
     expect(setup.data.session.family("ses_root")).toHaveLength(251)
     expect(setup.data.session.cost("ses_root")).toBe(250.5)
     expect(requests.toSorted()).toEqual([
@@ -669,8 +707,8 @@ test("revalidates after an event overtakes an active session read", async () => 
 })
 
 test("preserves a live session rename across concurrent session and family reads", async () => {
-  const family = Promise.withResolvers<void>()
-  const renamed = Promise.withResolvers<void>()
+  const root = Promise.withResolvers<void>()
+  const requested = Promise.withResolvers<void>()
   const listeners = new Set<Parameters<CreateDataInput["event"]["listen"]>[0]>()
   let requests = 0
   const stale = { ...session(0), title: undefined }
@@ -680,7 +718,8 @@ test("preserves a live session rename across concurrent session and family reads
       const request = input instanceof Request ? input : new Request(input, init)
       if (!request.url.endsWith(`/api/session/${stale.id}`)) return Response.json({ data: [], cursor: {} })
       requests++
-      await (requests === 1 ? family.promise : renamed.promise)
+      requested.resolve()
+      await root.promise
       return Response.json({ data: stale })
     },
   })
@@ -701,7 +740,7 @@ test("preserves a live session rename across concurrent session and family reads
 
   try {
     const initial = setup.data.session.sync(stale.id, { children: true })
-    await wait(() => requests === 1)
+    await requested.promise
     const event: OpenCodeEvent = {
       id: "evt_renamed",
       created: 1,
@@ -710,17 +749,15 @@ test("preserves a live session rename across concurrent session and family reads
       data: { sessionID: stale.id, title: "Generated title" },
     }
     listeners.forEach((listener) => listener({ name: event.type, details: event }))
-    await wait(() => requests === 2)
-    renamed.resolve()
-    await wait(() => setup.data.session.get(stale.id) !== undefined)
-    family.resolve()
+    const plain = setup.data.session.sync(stale.id)
+    root.resolve()
     await initial
-    await Bun.sleep(0)
+    await Promise.all([initial, plain])
 
     expect(setup.data.session.get(stale.id)?.title).toBe("Generated title")
+    expect(requests).toBe(1)
   } finally {
-    family.resolve()
-    renamed.resolve()
+    root.resolve()
     setup.dispose()
   }
 })
